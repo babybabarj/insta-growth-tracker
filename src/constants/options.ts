@@ -253,6 +253,7 @@ export const planStatuses: DailyPlanStatus[] = [
   'Filmed',
   'Edited',
   'Posted',
+  'Completed',
   'Skipped',
   'Reuse Later',
 ]

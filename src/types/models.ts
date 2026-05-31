@@ -9,6 +9,7 @@ export type DailyPlanStatus =
   | 'Filmed'
   | 'Edited'
   | 'Posted'
+  | 'Completed'
   | 'Skipped'
   | 'Reuse Later'
 

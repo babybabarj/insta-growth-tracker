@@ -13,8 +13,8 @@ import { getTodayRecommendation, getWeeklyDiagnosis } from './utils/recommendati
 
 type ChecklistKey = keyof typeof checklistLabels
 type SortKey = 'datePosted' | 'reach' | 'shares' | 'saves' | 'followsGained' | 'followConversionRate'
-type LibrarySection = 'ideas' | 'hooks' | 'captions' | 'hashtags' | 'stories' | 'carousels' | 'guide'
-type MoreSection = 'backup' | 'goals' | 'collabs' | 'inspiration' | 'privacy'
+type LibrarySection = 'ideas' | 'hooks' | 'captions' | 'hashtags' | 'guide'
+type MoreSection = 'backup' | 'settings' | 'privacy'
 type ReviewSection = 'weekly' | 'monthly' | 'pillars' | 'audience' | 'experiments' | 'remakes' | 'comments' | 'profile' | 'streak'
 type OcrFieldStatus = 'Detected' | 'Needs review' | 'Not found'
 type OcrDetectedFields = Partial<Pick<ReelPerformance, 'reelTitle' | 'datePosted' | 'views' | 'reach' | 'likes' | 'comments' | 'saves' | 'shares' | 'profileVisits' | 'followsGained' | 'averageWatchTime' | 'nonFollowerReach'>>
@@ -355,6 +355,42 @@ const getPlanSuggestions = (pillar: string, hooks: HookItem[], captions: Caption
   }
 }
 
+const planFromIdea = (idea: IdeaMap, hashtagOptions: string[], date = todayISO()): DailyPlan => ({
+  ...createDailyPlan(date),
+  dayNumber: idea.dayNumber,
+  primaryReelTitle: idea.reelTitle,
+  secondReelTitle: idea.secondReelIdea,
+  contentPillar: idea.contentPillar,
+  seriesName: idea.seriesName,
+  reelGoal: idea.reelGoal || reelGoals[0],
+  hook: idea.hook,
+  fullIdea: idea.fullIdea || '',
+  scriptOutline: idea.scriptOutline,
+  videoBackground: idea.videoBackground,
+  videoLength: idea.reelLength,
+  captionDraft: idea.caption || '',
+  captionCTA: idea.captionCTA,
+  hashtagSet: hashtagOptions.includes(idea.hashtagSet) ? idea.hashtagSet : (hashtagOptions[0] ?? hashtagSets[0]),
+  searchKeywords: idea.searchKeywords || '',
+  coverText: idea.coverText || '',
+  storyFollowUp: idea.storyFollowUp,
+  plannedPostingTime: idea.suggestedPostingTime || postingTimeOptions[0],
+  status: 'Planned',
+  notes: idea.notes,
+})
+
+const getReelRecommendation = (reel: ReelPerformance, currentFollowers = 0) => {
+  const metrics = calculateReelMetrics(reel, currentFollowers)
+  if (!reel.views && !reel.reach && !reel.likes && !reel.comments && !reel.saves && !reel.shares && !reel.followsGained) {
+    return 'Add Reel stats to get a recommendation.'
+  }
+  if (reel.shares >= reel.saves && reel.shares >= 5) return 'This Reel is shareable. Make 2 more versions.'
+  if (reel.saves >= reel.shares && reel.saves >= 5) return 'This topic is useful. Turn it into a carousel.'
+  if (reel.profileVisits >= 10 && reel.followsGained < Math.max(2, reel.profileVisits * 0.08)) return 'Improve follow CTA and profile conversion.'
+  if (reel.reach < 1000 && metrics.engagementRate >= 5) return 'Try this idea again with a stronger hook.'
+  return reel.decision || 'Keep tracking this format and choose the next action after 24h, 72h, and 7d data.'
+}
+
 const parseMetricNumber = (raw: string) => {
   const normalized = raw.replace(/,/g, '').trim().toLowerCase()
   const match = normalized.match(/(\d+(?:\.\d+)?)\s*([km])?/)
@@ -649,13 +685,28 @@ function App() {
             await refreshData()
             markSaved('Today checklist saved')
           }}
-          onCreatePlan={async () => {
-            const plan = createDailyPlan(today)
-            await db.dailyPlans.add(plan)
+          onToggleStoryBundle={async () => {
+            const base = todaysChecklist ?? createDailyChecklist(today)
+            const storyCount = [base.story1Posted, base.story2Posted, base.story3Posted, base.story4Posted, base.story5Posted].filter(Boolean).length
+            const next = {
+              ...base,
+              story1Posted: storyCount < 3,
+              story2Posted: storyCount < 3,
+              story3Posted: storyCount < 3,
+              story4Posted: storyCount >= 3 ? false : base.story4Posted,
+              story5Posted: storyCount >= 3 ? false : base.story5Posted,
+              updatedAt: nowISO(),
+            }
+            await db.dailyChecklists.put(next)
+            await saveTodayStreakHistory(next)
             await refreshData()
-            setActiveTab('plan')
-            markSaved('Today plan created')
+            markSaved('Story checklist saved')
           }}
+          onCreatePlan={async () => {
+            setActiveTab('plan')
+            markSaved('Choose a day from the 90-day plan', false)
+          }}
+          onOpenPlan={() => setActiveTab('plan')}
         />
       )
     }
@@ -702,6 +753,7 @@ function App() {
           contentIdeas={data.contentIdeas}
           hooks={data.hooks}
           captions={data.captionTemplates}
+          ideaMaps={data.ideaMaps}
           hashtagRecords={data.hashtagSetRecords}
           storyTrackers={data.storyTrackers}
           carouselPlans={data.carouselPlans}
@@ -844,7 +896,9 @@ function TodayScreen({
   backupReminder,
   streakHistory,
   onToggleChecklist,
+  onToggleStoryBundle,
   onCreatePlan,
+  onOpenPlan,
 }: {
   checklist?: DailyChecklist
   plan?: DailyPlan
@@ -856,7 +910,9 @@ function TodayScreen({
   backupReminder: boolean
   streakHistory: StreakHistory[]
   onToggleChecklist: (key: ChecklistKey) => void
+  onToggleStoryBundle: () => void
   onCreatePlan: () => void
+  onOpenPlan: () => void
 }) {
   const score = calculateDailyScore(checklist)
   const storyCount = checklist
@@ -871,7 +927,8 @@ function TodayScreen({
   const goalStatus = calculateGoal(goal, latestReview ? [latestReview] : [])
   const [showDetails, setShowDetails] = useState(false)
   const weeklyMetrics = latestReview ? calculateWeeklyMetrics(latestReview) : undefined
-  const todayStatus = score >= 75 ? 'Strong day' : score >= 45 ? 'On track' : 'Weak day'
+  const todayStatus = score >= 90 ? 'Excellent day' : score >= 75 ? 'Strong day' : score >= 45 ? 'On track' : 'Weak day'
+  const todayReward = streakStats.todayCompleted ? streakStats.currentReward : streakStats.nextReward
   const monthlyCheesecakes = Math.min(Math.floor(streakStats.completedThisWeek / 7), 4)
   const rewardPath = [
     ['🍪', 'Cookie'],
@@ -893,9 +950,9 @@ function TodayScreen({
       <Card>
         <div className="streak-hero">
           <div>
-            <p className="eyebrow">Streak hero</p>
+            <p className="eyebrow">Weekly progress {streakStats.weeklyProgress}/7</p>
             <h2>{streakStats.currentStreak} day streak</h2>
-            <p className="muted">Weekly progress {streakStats.weeklyProgress}/7</p>
+            <p className="muted">Today’s reward: {todayReward}</p>
           </div>
           <div className="cheesecake-orb" aria-label="Cheesecake reward">🍰</div>
         </div>
@@ -918,6 +975,12 @@ function TodayScreen({
             <strong>Congratulations! Weekly streak completed.</strong>
           </div>
         )}
+        {score < 75 && (
+          <div className="risk-card">
+            <strong>Streak at risk</strong>
+            <span>Reach 75 by finishing the basics today.</span>
+          </div>
+        )}
         <div className="monthly-cheesecake">
           <div>
             <p className="eyebrow">Monthly Cheesecake Goal</p>
@@ -933,11 +996,15 @@ function TodayScreen({
         <div className="section-head">
           <div>
             <p className="eyebrow">Today’s focus</p>
-            <h2>{plan?.primaryReelTitle || 'No Reel planned for today'}</h2>
+            <h2>{plan?.primaryReelTitle || 'No Reel planned for today.'}</h2>
           </div>
-          {!plan && (
+          {plan ? (
+            <button className="primary-button" type="button" onClick={onOpenPlan}>
+              Open plan
+            </button>
+          ) : (
             <button className="primary-button" type="button" onClick={onCreatePlan}>
-              Plan today
+              Choose from 90-day plan
             </button>
           )}
         </div>
@@ -945,8 +1012,8 @@ function TodayScreen({
           <div className="stack">
             <p className="muted">{plan.hook || 'No hook added yet.'}</p>
             <div className="chip-row">
+              {plan.dayNumber && <span className="chip">Day {plan.dayNumber}</span>}
               <span className="chip">{plan.contentPillar}</span>
-              <span className="chip">{plan.reelGoal}</span>
               <span className="chip">{plan.status}</span>
             </div>
             {plan.secondReelTitle && <p><strong>Optional second Reel:</strong> {plan.secondReelTitle}</p>}
@@ -972,10 +1039,20 @@ function TodayScreen({
       <Card>
         <h2>Daily checklist</h2>
         <div className="check-grid">
-          {(Object.keys(checklistLabels) as ChecklistKey[]).map((key) => (
+          {(['reelPosted', 'captionAdded', 'hashtagsAdded', 'coverChecked', 'reelSharedToStory'] as ChecklistKey[]).map((key) => (
             <label className="check-row" key={key}>
               <input type="checkbox" checked={Boolean(checklist?.[key])} onChange={() => onToggleChecklist(key)} />
               <span>{checklistLabels[key]}</span>
+            </label>
+          ))}
+          <label className="check-row">
+            <input type="checkbox" checked={storyCount >= 3} onChange={onToggleStoryBundle} />
+            <span>3+ Stories posted</span>
+          </label>
+          {(['commentsReplied', 'yesterdayStatsUpdated', 'tomorrowIdeaPlanned'] as ChecklistKey[]).map((key) => (
+            <label className="check-row" key={key}>
+              <input type="checkbox" checked={Boolean(checklist?.[key])} onChange={() => onToggleChecklist(key)} />
+              <span>{key === 'yesterdayStatsUpdated' ? 'Stats updated' : key === 'tomorrowIdeaPlanned' ? 'Tomorrow planned' : checklistLabels[key]}</span>
             </label>
           ))}
         </div>
@@ -1054,11 +1131,25 @@ function PlannerScreen({
   refreshData: () => Promise<void>
 }) {
   const [editing, setEditing] = useState<DailyPlan>(() => createDailyPlan())
-  const [showQuickCreate, setShowQuickCreate] = useState(false)
+  const [editingIdea, setEditingIdea] = useState<IdeaMap>(() => createIdeaMap())
+  const [selectedDay, setSelectedDay] = useState(() => ideaMaps[0]?.dayNumber ?? 1)
+  const [showIdeaEditor, setShowIdeaEditor] = useState(false)
   const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
   const filteredPlans = plans.filter((plan) =>
     [plan.primaryReelTitle, plan.hook, plan.notes, plan.contentPillar].some((field) => field.toLowerCase().includes(search.toLowerCase())),
   )
+  const selectedIdea = ideaMaps.find((idea) => idea.dayNumber === selectedDay)
+  const daySearch = search.toLowerCase()
+  const dayOptions = Array.from({ length: 90 }, (_, index) => {
+    const dayNumber = index + 1
+    const idea = ideaMaps.find((item) => item.dayNumber === dayNumber)
+    return { dayNumber, idea }
+  }).filter(({ idea, dayNumber }) => {
+    const matchesSearch = !daySearch || String(dayNumber).includes(daySearch) || [idea?.reelTitle, idea?.hook, idea?.contentPillar].filter(Boolean).some((field) => String(field).toLowerCase().includes(daySearch))
+    const matchesStatus = !statusFilter || idea?.status === statusFilter
+    return matchesSearch && matchesStatus
+  })
 
   const savePlan = async (event: FormEvent) => {
     event.preventDefault()
@@ -1075,29 +1166,134 @@ function PlannerScreen({
     if (editing.id === id) setEditing(createDailyPlan())
   }
 
+  const saveIdea = async (event: FormEvent) => {
+    event.preventDefault()
+    await db.ideaMaps.put({ ...editingIdea, updatedAt: nowISO() })
+    await refreshData()
+    onSave('90-day idea saved')
+    setShowIdeaEditor(false)
+  }
+
+  const loadMap = async () => {
+    if (ideaMaps.length > 0 && !window.confirm('Add another 90-day idea map? Existing ideas will stay.')) return
+    await db.ideaMaps.bulkAdd(generateIdeaMapItems())
+    await refreshData()
+    onSave('90-day idea map loaded')
+  }
+
+  const useIdeaForToday = async (idea: IdeaMap) => {
+    const today = todayISO()
+    const existing = plans.find((plan) => plan.date === today)
+    const nextPlan = planFromIdea(idea, hashtagOptions, today)
+    if (existing) {
+      const choice = window.prompt('A plan already exists for today. Type "replace" to replace it, "keep" to keep both, or "cancel" to stop.', 'replace')?.toLowerCase().trim()
+      if (!choice || choice === 'cancel') return
+      if (choice === 'replace') {
+        await db.dailyPlans.put({ ...nextPlan, id: existing.id, createdAt: existing.createdAt, updatedAt: nowISO() })
+      } else if (choice === 'keep') {
+        await db.dailyPlans.add({ ...nextPlan, updatedAt: nowISO() })
+      } else {
+        return
+      }
+    } else {
+      await db.dailyPlans.add({ ...nextPlan, updatedAt: nowISO() })
+    }
+    await db.ideaMaps.put({ ...idea, status: 'Planned', updatedAt: nowISO() })
+    setEditing(nextPlan)
+    await refreshData()
+    onSave('Today plan filled from 90-day map')
+  }
+
+  const updateIdeaStatus = async (idea: IdeaMap, status: IdeaMap['status']) => {
+    await db.ideaMaps.put({ ...idea, status, updatedAt: nowISO() })
+    const todayPlan = plans.find((plan) => plan.date === todayISO() && plan.dayNumber === idea.dayNumber)
+    if (todayPlan) await db.dailyPlans.put({ ...todayPlan, status, updatedAt: nowISO() })
+    await refreshData()
+    onSave(status === 'Completed' ? 'Day marked completed' : 'Day updated')
+  }
+
+  const completePlan = async (plan: DailyPlan) => {
+    await db.dailyPlans.put({ ...plan, status: 'Completed', updatedAt: nowISO() })
+    const linkedIdea = plan.dayNumber ? ideaMaps.find((idea) => idea.dayNumber === plan.dayNumber) : undefined
+    if (linkedIdea) await db.ideaMaps.put({ ...linkedIdea, status: 'Completed', updatedAt: nowISO() })
+    await refreshData()
+    onSave('Plan marked completed')
+  }
+
   return (
     <Screen title="Plan" eyebrow="Daily planner">
       <Card>
-        <div className="button-cluster">
-          <button className="secondary-button" type="button" onClick={() => setShowQuickCreate(!showQuickCreate)}>
-            {showQuickCreate ? 'Close Quick Create' : 'Quick Create Plan'}
-          </button>
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Select content day</p>
+            <h2>Choose Day 1-90</h2>
+          </div>
+          <button className="secondary-button" type="button" onClick={loadMap}>Load 90-Day Idea Map</button>
+        </div>
+        <div className="form-grid compact">
+          <Select label="Selected day" value={String(selectedDay)} onChange={(value) => setSelectedDay(numberOrZero(value))} options={Array.from({ length: 90 }, (_, index) => String(index + 1))} getOptionLabel={(value) => `Day ${value}`} />
+          <Input label="Search day/title" value={search} onChange={setSearch} />
+          <Select label="Filter status" value={statusFilter} onChange={setStatusFilter} options={['', ...planStatuses]} />
+        </div>
+        <div className="day-picker" aria-label="90-day content picker">
+          {dayOptions.map(({ dayNumber, idea }) => (
+            <button
+              className={`day-tile ${dayNumber === selectedDay ? 'active' : ''} ${idea?.status === 'Completed' || idea?.status === 'Posted' ? 'completed' : ''} ${idea?.status === 'Skipped' ? 'skipped' : ''}`}
+              key={dayNumber}
+              type="button"
+              onClick={() => setSelectedDay(dayNumber)}
+            >
+              <span>Day {dayNumber}</span>
+              <small>{idea?.status ?? 'Empty'}</small>
+            </button>
+          ))}
         </div>
       </Card>
-      {showQuickCreate && (
-        <Card tone="blue">
-          <QuickCreatePlan
-            hashtagOptions={hashtagOptions}
-            suggestions={getPlanSuggestions(editing.contentPillar, hooks, captions, hashtagRecords)}
-            onCreate={(plan) => {
-              setEditing(plan)
-              setShowQuickCreate(false)
-              onSave('Quick Create plan ready to review')
-            }}
-          />
+
+      {selectedIdea ? (
+        <Card>
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Day {selectedIdea.dayNumber} · {selectedIdea.status}</p>
+              <h2>{selectedIdea.reelTitle || 'Untitled idea'}</h2>
+            </div>
+            <div className="button-cluster">
+              <button className="primary-button" type="button" onClick={() => useIdeaForToday(selectedIdea)}>Use this for today</button>
+              <button className="secondary-button" type="button" onClick={() => { setEditingIdea(selectedIdea); setShowIdeaEditor(true) }}>Edit idea</button>
+            </div>
+          </div>
+          <div className="idea-preview">
+            <p><strong>Pillar:</strong> {selectedIdea.contentPillar}</p>
+            <p><strong>Series:</strong> {selectedIdea.seriesName}</p>
+            <p><strong>Hook:</strong> {selectedIdea.hook || 'No hook yet.'}</p>
+            <p><strong>Idea:</strong> {selectedIdea.fullIdea || selectedIdea.scriptOutline || 'No idea summary yet.'}</p>
+            <p><strong>Duration:</strong> {selectedIdea.reelLength}</p>
+            <p><strong>Posting:</strong> {selectedIdea.suggestedPostingTime}</p>
+            <p><strong>CTA:</strong> {selectedIdea.captionCTA}</p>
+            <p><strong>Hashtags:</strong> {selectedIdea.hashtagSet}</p>
+            <p><strong>Keywords:</strong> {selectedIdea.searchKeywords || 'Not set'}</p>
+            <p><strong>Cover:</strong> {selectedIdea.coverText || 'Not set'}</p>
+            <p><strong>Story:</strong> {selectedIdea.storyFollowUp || 'Not set'}</p>
+            {selectedIdea.secondReelIdea && <p><strong>Optional second Reel:</strong> {selectedIdea.secondReelIdea}</p>}
+          </div>
+          <div className="button-cluster">
+            <button className="secondary-button" type="button" onClick={() => updateIdeaStatus(selectedIdea, 'Completed')}>Mark completed</button>
+            <button className="secondary-button" type="button" onClick={() => updateIdeaStatus(selectedIdea, 'Skipped')}>Skip day</button>
+          </div>
         </Card>
+      ) : (
+        <EmptyState title="No idea for this day yet" text="Load the 90-day idea map or edit this day to add one." />
       )}
-      <Card>
+
+      {showIdeaEditor && (
+        <details className="form-panel" open>
+          <summary>Edit selected 90-day idea</summary>
+          <IdeaMapForm idea={editingIdea} setIdea={setEditingIdea} hashtagOptions={hashtagOptions} onSubmit={saveIdea} />
+        </details>
+      )}
+
+      <details className="form-panel" open>
+        <summary>Daily plan fields</summary>
         <PlanForm
           plan={editing}
           setPlan={setEditing}
@@ -1107,8 +1303,7 @@ function PlannerScreen({
           hashtagOptions={hashtagOptions}
           suggestions={getPlanSuggestions(editing.contentPillar, hooks, captions, hashtagRecords)}
         />
-      </Card>
-      <Card><Input label="Search daily plans" value={search} onChange={setSearch} /></Card>
+      </details>
 
       <RecordList
         title="Saved plans"
@@ -1119,24 +1314,22 @@ function PlannerScreen({
           <Card key={plan.id}>
             <div className="section-head">
               <div>
-                <p className="eyebrow">{formatDate(plan.date)} · {plan.status}</p>
+                <p className="eyebrow">{formatDate(plan.date)} · {plan.dayNumber ? `Day ${plan.dayNumber}` : 'No day'} · {plan.status}</p>
                 <h2>{plan.primaryReelTitle || 'Untitled Reel plan'}</h2>
-                <p className="muted">{plan.hook || 'No hook added.'}</p>
               </div>
               <div className="button-cluster">
                 <button className="secondary-button" type="button" onClick={() => setEditing(plan)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => completePlan(plan)}>Complete</button>
                 <button className="danger-button" type="button" onClick={() => deletePlan(plan.id)}>Delete</button>
               </div>
             </div>
-            <div className="chip-row">
+            <div className={`chip-row ${plan.status === 'Completed' ? 'muted-row' : ''}`}>
               <span className="chip">{plan.contentPillar}</span>
-              <span className="chip">{plan.seriesName}</span>
-              <span className="chip">{plan.reelGoal}</span>
+              <span className="chip">{plan.status}</span>
             </div>
           </Card>
         ))}
       </RecordList>
-      <IdeaMapSection ideas={ideaMaps} hashtagOptions={hashtagOptions} onSave={onSave} refreshData={refreshData} />
     </Screen>
   )
 }
@@ -1246,11 +1439,11 @@ function ReelsScreen({
         <div className="section-head">
           <div>
             <h2>Add Reel performance</h2>
-            <p className="muted">Add manually or import analytics from a screenshot. OCR runs locally in this browser.</p>
+            <p className="muted">Add manually or import analytics from a screenshot.</p>
           </div>
           <div className="button-cluster">
             <button className="secondary-button" type="button" onClick={resetForm}>Add manually</button>
-            <button className="primary-button" type="button" onClick={() => setShowOcrImport(!showOcrImport)}>Import From Screenshot</button>
+            <button className="primary-button" type="button" onClick={() => setShowOcrImport(!showOcrImport)}>Import from screenshot</button>
           </div>
         </div>
       </Card>
@@ -1339,12 +1532,25 @@ function ReelsScreen({
               </div>
               <DashboardGrid>
                 <MetricCard label="Reach" value={formatNumber(reel.reach)} />
-                <MetricCard label="Shares" value={formatNumber(reel.shares)} />
                 <MetricCard label="Saves" value={formatNumber(reel.saves)} />
+                <MetricCard label="Shares" value={formatNumber(reel.shares)} />
                 <MetricCard label="Follows" value={formatNumber(reel.followsGained)} />
-                <MetricCard label="Engagement" value={formatPercent(reelMetrics.engagementRate)} />
-                <MetricCard label="Follow conversion" value={formatPercent(reelMetrics.followConversionRate)} />
               </DashboardGrid>
+              <div className="inline-insight">
+                <p className="eyebrow">Recommendation</p>
+                <h2>{getReelRecommendation(reel, currentFollowers)}</h2>
+              </div>
+              <details>
+                <summary>Full details</summary>
+                <DashboardGrid>
+                  <MetricCard label="Views" value={formatNumber(reel.views)} />
+                  <MetricCard label="Likes" value={formatNumber(reel.likes)} />
+                  <MetricCard label="Comments" value={formatNumber(reel.comments)} />
+                  <MetricCard label="Profile visits" value={formatNumber(reel.profileVisits)} />
+                  <MetricCard label="Engagement" value={formatPercent(reelMetrics.engagementRate)} />
+                  <MetricCard label="Follow conversion" value={formatPercent(reelMetrics.followConversionRate)} />
+                </DashboardGrid>
+              </details>
             </Card>
           )
         })}
@@ -1414,9 +1620,9 @@ function OcrImportPanel({
     <Card>
       <div className="section-head">
         <div>
-          <p className="eyebrow">Import From Screenshot</p>
-          <h2>OCR analytics review</h2>
-          <p className="muted">OCR may not be perfect. Please review numbers before saving.</p>
+          <p className="eyebrow">Upload analytics screenshot</p>
+          <h2>Extracted values review</h2>
+          <p className="muted">OCR may not be perfect. Review values before saving.</p>
         </div>
         <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
       </div>
@@ -1465,6 +1671,8 @@ function ReviewScreen({ data, onSave, refreshData }: { data: AppData; onSave: (m
     { key: 'weekly', label: 'Weekly' },
     { key: 'monthly', label: 'Monthly' },
     { key: 'pillars', label: 'Pillars' },
+  ]
+  const advancedSections: Array<{ key: ReviewSection; label: string }> = [
     { key: 'audience', label: 'Audience' },
     { key: 'experiments', label: 'Experiments' },
     { key: 'remakes', label: 'Remakes' },
@@ -1472,6 +1680,11 @@ function ReviewScreen({ data, onSave, refreshData }: { data: AppData; onSave: (m
     { key: 'profile', label: 'Profile' },
     { key: 'streak', label: 'Streak' },
   ]
+  const latestReview = data.weeklyReviews[0]
+  const latestMetrics = latestReview ? calculateWeeklyMetrics(latestReview) : undefined
+  const bestReel = data.reelPerformances.reduce<ReelPerformance | undefined>((best, reel) => (!best || reel.reach > best.reach ? reel : best), undefined)
+  const weakArea = latestReview?.worstContentPillar || latestReview?.worstReel || 'Add weekly stats'
+  const nextAction = latestReview?.nextWeekFocus || diagnosis
 
   const saveReview = async (event: FormEvent) => {
     event.preventDefault()
@@ -1499,7 +1712,15 @@ function ReviewScreen({ data, onSave, refreshData }: { data: AppData; onSave: (m
       </div>
       {section === 'weekly' && (
         <div className="stack">
-          <details className="card form-panel" open>
+          <DashboardGrid>
+            <MetricCard label="Followers gained" value={formatNumber(latestMetrics?.followersGained ?? metrics.followersGained)} />
+            <MetricCard label="Total reach" value={formatNumber(latestReview?.totalReach ?? editing.totalReach)} />
+            <MetricCard label="Reels posted" value={formatNumber(latestReview?.reelsPosted ?? editing.reelsPosted)} />
+            <MetricCard label="Best Reel" value={latestReview?.bestReel || bestReel?.reelTitle || 'No data'} />
+            <MetricCard label="Weak area" value={weakArea} />
+            <MetricCard label="Next action" value={nextAction} />
+          </DashboardGrid>
+          <details className="form-panel">
             <summary>Add or edit weekly review</summary>
             <ReviewForm review={editing} setReview={setEditing} onSubmit={saveReview} metrics={metrics} diagnosis={diagnosis} />
           </details>
@@ -1533,6 +1754,17 @@ function ReviewScreen({ data, onSave, refreshData }: { data: AppData; onSave: (m
       )}
       {section === 'monthly' && <MonthlyReviewsSection reviews={data.monthlyReviews} onSave={onSave} refreshData={refreshData} />}
       {section === 'pillars' && <PillarBalanceSection reels={data.reelPerformances} />}
+      <details className="form-panel" open={advancedSections.some((item) => item.key === section)}>
+        <summary>Advanced Review</summary>
+        <p className="muted">Advanced tools are optional.</p>
+        <div className="section-tabs">
+          {advancedSections.map((item) => (
+            <button key={item.key} type="button" className={section === item.key ? 'active' : ''} onClick={() => setSection(item.key)}>
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </details>
       {section === 'audience' && <AudienceInsightsSection insights={data.audienceInsights} onSave={onSave} refreshData={refreshData} />}
       {section === 'experiments' && <ExperimentsSection experiments={data.experiments} onSave={onSave} refreshData={refreshData} />}
       {section === 'remakes' && <RemakeIdeasSection ideas={data.remakeIdeas} reels={data.reelPerformances} onSave={onSave} refreshData={refreshData} />}
@@ -1543,94 +1775,12 @@ function ReviewScreen({ data, onSave, refreshData }: { data: AppData; onSave: (m
   )
 }
 
-function IdeaMapSection({ ideas, hashtagOptions, onSave, refreshData }: { ideas: IdeaMap[]; hashtagOptions: string[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
-  const [editing, setEditing] = useState<IdeaMap>(() => createIdeaMap())
-  const [search, setSearch] = useState('')
-  const [status, setStatus] = useState('')
-  const [pillar, setPillar] = useState('')
-  const filtered = ideas.filter((idea) => {
-    const query = search.toLowerCase()
-    return [idea.reelTitle, idea.hook, idea.notes, idea.seriesName].some((field) => field.toLowerCase().includes(query)) && (!status || idea.status === status) && (!pillar || idea.contentPillar === pillar)
-  })
-  const save = async (event: FormEvent) => {
-    event.preventDefault()
-    await db.ideaMaps.put({ ...editing, updatedAt: nowISO() })
-    await refreshData()
-    onSave('90-day idea saved')
-    setEditing(createIdeaMap())
-  }
-  const loadMap = async () => {
-    if (ideas.length > 0 && !window.confirm('Add another 90-day idea map? Existing ideas will stay.')) return
-    await db.ideaMaps.bulkAdd(generateIdeaMapItems())
-    await refreshData()
-    onSave('90-day idea map loaded')
-  }
-  const moveToPlan = async (idea: IdeaMap) => {
-    const duplicate = await db.dailyPlans.where('primaryReelTitle').equals(idea.reelTitle).first()
-    if (duplicate && !window.confirm('A daily plan with this title already exists. Add another one?')) return
-    await db.dailyPlans.add({
-      ...createDailyPlan(),
-      date: idea.date || todayISO(),
-      dayNumber: idea.dayNumber,
-      primaryReelTitle: idea.reelTitle,
-      secondReelTitle: idea.secondReelIdea,
-      contentPillar: idea.contentPillar,
-      seriesName: idea.seriesName,
-      reelGoal: idea.reelGoal ?? reelGoals[0],
-      hook: idea.hook,
-      fullIdea: idea.fullIdea ?? '',
-      scriptOutline: idea.scriptOutline,
-      videoBackground: idea.videoBackground,
-      videoLength: idea.reelLength,
-      plannedPostingTime: idea.suggestedPostingTime ?? postingTimeOptions[0],
-      captionDraft: idea.caption ?? '',
-      captionCTA: idea.captionCTA,
-      hashtagSet: hashtagOptions.includes(idea.hashtagSet) ? idea.hashtagSet : hashtagOptions[0],
-      searchKeywords: idea.searchKeywords ?? '',
-      coverText: idea.coverText ?? '',
-      storyFollowUp: idea.storyFollowUp,
-      status: 'Planned',
-      notes: idea.notes,
-    })
-    await db.ideaMaps.put({ ...idea, status: 'Planned', updatedAt: nowISO() })
-    await refreshData()
-    onSave('Idea moved into Daily Plan')
-  }
-  return (
-    <div className="stack">
-      <Card tone="blue">
-        <div className="section-head">
-          <div><h2>90-Day Idea Map</h2><p className="muted">Load, edit, filter, and move ideas into your Daily Plan.</p></div>
-          <button className="secondary-button" type="button" onClick={loadMap}>Load 90-Day Idea Map</button>
-        </div>
-      </Card>
-      <Card><IdeaMapForm idea={editing} setIdea={setEditing} hashtagOptions={hashtagOptions} onSubmit={save} /></Card>
-      <Card>
-        <div className="form-grid compact">
-          <Input label="Search idea map" value={search} onChange={setSearch} />
-          <Select label="Filter status" value={status} onChange={setStatus} options={['', ...planStatuses]} />
-          <Select label="Filter pillar" value={pillar} onChange={setPillar} options={['', ...contentPillars]} />
-        </div>
-      </Card>
-      <RecordList title="90-day ideas" emptyTitle="No 90-day ideas yet" emptyText="Click Load 90-Day Idea Map to add editable day-wise ideas.">
-        {filtered.map((idea) => (
-          <Card key={idea.id}>
-            <div className="section-head">
-              <div><p className="eyebrow">Day {idea.dayNumber} · {idea.contentPillar} · {idea.status}</p><h2>{idea.reelTitle || 'Untitled idea'}</h2><p className="muted">{idea.hook || 'No hook yet.'}</p></div>
-              <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => moveToPlan(idea)}>Move to Daily Plan</button>
-                <button className="secondary-button" type="button" onClick={() => setEditing(idea)}>Edit</button>
-              </div>
-            </div>
-          </Card>
-        ))}
-      </RecordList>
-    </div>
-  )
-}
-
 function PillarBalanceSection({ reels }: { reels: ReelPerformance[] }) {
   const balance = calculatePillarBalance(reels)
+  const activeRows = balance.rows.filter((row) => row.count > 0)
+  if (balance.total === 0) {
+    return <EmptyState title="No weekly Reel data yet" text="Add Reel stats to see pillar balance." />
+  }
   return (
     <div className="stack">
       <DashboardGrid>
@@ -1639,16 +1789,17 @@ function PillarBalanceSection({ reels }: { reels: ReelPerformance[] }) {
         <MetricCard label="Weakest pillar" value={balance.weakest?.pillar ?? 'No data'} />
       </DashboardGrid>
       <Card tone="blue"><h2>{balance.recommendation}</h2></Card>
-      <RecordList title="Weekly pillar balance" emptyTitle="No weekly Reel data" emptyText="Log Reel performance this week to see pillar percentages.">
-        {balance.rows.filter((row) => row.count > 0).map((row) => (
+      <RecordList title="Weekly pillar balance" emptyTitle="No weekly Reel data" emptyText="Add Reel stats to see pillar balance.">
+        {activeRows.map((row) => (
           <Card key={row.pillar}>
             <div className="section-head"><div><p className="eyebrow">{formatPercent(row.percentage)} of this week</p><h2>{row.pillar}</h2></div></div>
-            <DashboardGrid>
-              <MetricCard label="Count" value={formatNumber(row.count)} />
-              <MetricCard label="Shares" value={formatNumber(row.shares)} />
-              <MetricCard label="Saves" value={formatNumber(row.saves)} />
-              <MetricCard label="Follows" value={formatNumber(row.follows)} />
-            </DashboardGrid>
+            <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.min(row.percentage, 100)}%` }} /></div>
+            <div className="chip-row">
+              <span className="chip">{formatNumber(row.count)} Reels</span>
+              <span className="chip">{formatNumber(row.shares)} shares</span>
+              <span className="chip">{formatNumber(row.saves)} saves</span>
+              <span className="chip">{formatNumber(row.follows)} follows</span>
+            </div>
           </Card>
         ))}
       </RecordList>
@@ -1786,9 +1937,23 @@ function MonthlyReviewsSection({ reviews, onSave, refreshData }: { reviews: Mont
     await refreshData()
     onSave('Monthly review deleted')
   }
+  const latest = reviews[0]
+  const latestGain = latest ? latest.endingFollowers - latest.startingFollowers : 0
   return (
-    <CrudSection title="Monthly reviews" emptyTitle="No monthly reviews yet" emptyText="Add a monthly review to summarize growth and strategy.">
-      <Card><MonthlyReviewForm review={editing} setReview={setEditing} onSubmit={save} /></Card>
+    <div className="stack">
+      <h2>Monthly reviews</h2>
+      <DashboardGrid>
+        <MetricCard label="Followers gained" value={formatNumber(latestGain)} />
+        <MetricCard label="Total reach" value={formatNumber(latest?.totalReach ?? 0)} />
+        <MetricCard label="Reels posted" value={formatNumber(latest?.totalReelsPosted ?? 0)} />
+        <MetricCard label="Best pillar" value={latest?.bestPillar || 'No data'} />
+        <MetricCard label="Weakest pillar" value={latest?.weakestPillar || 'No data'} />
+        <MetricCard label="Next month focus" value={latest?.nextMonthStrategy || 'Add monthly stats'} />
+      </DashboardGrid>
+      <details className="form-panel">
+        <summary>Add or edit monthly review</summary>
+        <MonthlyReviewForm review={editing} setReview={setEditing} onSubmit={save} />
+      </details>
       {reviews.map((review) => {
         const followerGain = review.endingFollowers - review.startingFollowers
         const avgReach = review.totalReelsPosted > 0 ? review.totalReach / review.totalReelsPosted : 0
@@ -1799,7 +1964,8 @@ function MonthlyReviewsSection({ reviews, onSave, refreshData }: { reviews: Mont
           </Card>
         )
       })}
-    </CrudSection>
+      {reviews.length === 0 && <EmptyState title="No monthly reviews yet" text="Add a monthly review to summarize growth and strategy." />}
+    </div>
   )
 }
 
@@ -1826,6 +1992,7 @@ function LibraryScreen({
   contentIdeas,
   hooks,
   captions,
+  ideaMaps,
   hashtagRecords,
   storyTrackers,
   carouselPlans,
@@ -1836,6 +2003,7 @@ function LibraryScreen({
   contentIdeas: ContentIdea[]
   hooks: HookItem[]
   captions: CaptionTemplate[]
+  ideaMaps: IdeaMap[]
   hashtagRecords: HashtagSetRecord[]
   storyTrackers: StoryTracker[]
   carouselPlans: CarouselPlan[]
@@ -1845,12 +2013,10 @@ function LibraryScreen({
 }) {
   const [section, setSection] = useState<LibrarySection>('ideas')
   const sections: Array<{ key: LibrarySection; label: string }> = [
-    { key: 'ideas', label: 'Ideas' },
+    { key: 'ideas', label: 'Idea Map' },
     { key: 'hooks', label: 'Hooks' },
     { key: 'captions', label: 'Captions' },
     { key: 'hashtags', label: 'Hashtags' },
-    { key: 'stories', label: 'Stories' },
-    { key: 'carousels', label: 'Carousels' },
     { key: 'guide', label: 'Guide' },
   ]
 
@@ -1863,16 +2029,100 @@ function LibraryScreen({
           </button>
         ))}
       </div>
-      {section === 'ideas' && (
-        <ContentIdeasSection ideas={contentIdeas} hashtagOptions={hashtagOptions} onSave={onSave} refreshData={refreshData} />
-      )}
+      {section === 'ideas' && <LibraryIdeaMapSection ideas={ideaMaps} hashtagOptions={hashtagOptions} onSave={onSave} refreshData={refreshData} />}
       {section === 'hooks' && <HooksSection hooks={hooks} onSave={onSave} refreshData={refreshData} />}
       {section === 'captions' && <CaptionsSection captions={captions} onSave={onSave} refreshData={refreshData} />}
       {section === 'hashtags' && <HashtagsSection hashtagRecords={hashtagRecords} onSave={onSave} refreshData={refreshData} />}
-      {section === 'stories' && <StoriesSection trackers={storyTrackers} onSave={onSave} refreshData={refreshData} />}
-      {section === 'carousels' && <CarouselsSection plans={carouselPlans} onSave={onSave} refreshData={refreshData} />}
       {section === 'guide' && <VisualGuideSection />}
+      <details className="form-panel">
+        <summary>Advanced Library</summary>
+        <div className="stack">
+          <details>
+            <summary>Manual Content Ideas</summary>
+            <ContentIdeasSection ideas={contentIdeas} hashtagOptions={hashtagOptions} onSave={onSave} refreshData={refreshData} />
+          </details>
+          <details>
+            <summary>Stories</summary>
+            <StoriesSection trackers={storyTrackers} onSave={onSave} refreshData={refreshData} />
+          </details>
+          <details>
+            <summary>Carousels</summary>
+            <CarouselsSection plans={carouselPlans} onSave={onSave} refreshData={refreshData} />
+          </details>
+        </div>
+      </details>
     </Screen>
+  )
+}
+
+function LibraryIdeaMapSection({ ideas, hashtagOptions, onSave, refreshData }: { ideas: IdeaMap[]; hashtagOptions: string[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
+  const [editing, setEditing] = useState<IdeaMap>(() => createIdeaMap())
+  const [showForm, setShowForm] = useState(false)
+  const [search, setSearch] = useState('')
+  const [status, setStatus] = useState('')
+  const filtered = ideas.filter((idea) => {
+    const query = search.toLowerCase()
+    return [idea.reelTitle, idea.hook, idea.contentPillar, idea.notes].some((field) => field.toLowerCase().includes(query)) && (!status || idea.status === status)
+  })
+  const save = async (event: FormEvent) => {
+    event.preventDefault()
+    await db.ideaMaps.put({ ...editing, updatedAt: nowISO() })
+    await refreshData()
+    onSave('90-day idea saved')
+    setEditing(createIdeaMap())
+    setShowForm(false)
+  }
+  const loadMap = async () => {
+    if (ideas.length > 0 && !window.confirm('Add another 90-day idea map? Existing ideas will stay.')) return
+    await db.ideaMaps.bulkAdd(generateIdeaMapItems())
+    await refreshData()
+    onSave('90-day idea map loaded')
+  }
+  const moveToPlan = async (idea: IdeaMap) => {
+    await db.dailyPlans.add(planFromIdea(idea, hashtagOptions, idea.date || todayISO()))
+    await db.ideaMaps.put({ ...idea, status: 'Planned', updatedAt: nowISO() })
+    await refreshData()
+    onSave('Idea moved to Daily Plan')
+  }
+  return (
+    <div className="stack">
+      <Card tone="blue">
+        <div className="section-head">
+          <div><h2>90-Day Idea Map</h2><p className="muted">Search days and move ideas into Plan.</p></div>
+          <button className="secondary-button" type="button" onClick={loadMap}>Load 90-Day Idea Map</button>
+        </div>
+      </Card>
+      <Card>
+        <div className="form-grid compact">
+          <Input label="Search ideas" value={search} onChange={setSearch} />
+          <Select label="Filter status" value={status} onChange={setStatus} options={['', ...planStatuses]} />
+        </div>
+      </Card>
+      <RecordList title="Day cards" emptyTitle="No idea map yet" emptyText="Load the 90-day idea map to start.">
+        {filtered.map((idea) => (
+          <Card key={idea.id}>
+            <div className="section-head">
+              <div>
+                <p className="eyebrow">Day {idea.dayNumber} · {idea.contentPillar}</p>
+                <h2>{idea.reelTitle || 'Untitled idea'}</h2>
+                <div className="chip-row"><span className="chip">{idea.status}</span></div>
+              </div>
+              <div className="button-cluster">
+                <button className="secondary-button" type="button" onClick={() => moveToPlan(idea)}>Move to Plan</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(idea); setShowForm(true) }}>Edit</button>
+              </div>
+            </div>
+          </Card>
+        ))}
+      </RecordList>
+      <button className="secondary-button" type="button" onClick={() => setShowForm(!showForm)}>Add idea</button>
+      {showForm && (
+        <details className="form-panel" open>
+          <summary>Add or edit idea</summary>
+          <IdeaMapForm idea={editing} setIdea={setEditing} hashtagOptions={hashtagOptions} onSubmit={save} />
+        </details>
+      )}
+    </div>
   )
 }
 
@@ -1888,6 +2138,7 @@ function ContentIdeasSection({
   refreshData: () => Promise<void>
 }) {
   const [editing, setEditing] = useState<ContentIdea>(() => createContentIdea())
+  const [showForm, setShowForm] = useState(false)
   const [search, setSearch] = useState('')
   const [pillarFilter, setPillarFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -1905,6 +2156,7 @@ function ContentIdeasSection({
     await refreshData()
     onSave('Content idea saved')
     setEditing(createContentIdea())
+    setShowForm(false)
   }
 
   const remove = async (id: string) => {
@@ -1962,14 +2214,10 @@ function ContentIdeasSection({
 
   return (
     <div className="stack">
-      <Card>
-        <ContentIdeaForm idea={editing} setIdea={setEditing} hashtagOptions={hashtagOptions} onSubmit={save} />
-      </Card>
       <Card tone="blue">
         <div className="section-head">
           <div>
             <h2>Starter ideas</h2>
-            <p className="muted">Optional. These do not load into a blank app unless you click.</p>
           </div>
           <button className="secondary-button" type="button" onClick={loadStarter}>Load Library Starter Ideas</button>
         </div>
@@ -1993,7 +2241,7 @@ function ContentIdeasSection({
               </div>
               <div className="button-cluster">
                 <button className="secondary-button" type="button" onClick={() => convertToPlan(idea)}>Make plan</button>
-                <button className="secondary-button" type="button" onClick={() => setEditing(idea)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(idea); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(idea.id)}>Delete</button>
               </div>
             </div>
@@ -2005,12 +2253,20 @@ function ContentIdeasSection({
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createContentIdea()); setShowForm(!showForm) }}>Add idea</button>
+      {showForm && (
+        <details className="form-panel" open>
+          <summary>Add or edit manual idea</summary>
+          <ContentIdeaForm idea={editing} setIdea={setEditing} hashtagOptions={hashtagOptions} onSubmit={save} />
+        </details>
+      )}
     </div>
   )
 }
 
 function HooksSection({ hooks, onSave, refreshData }: { hooks: HookItem[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<HookItem>(() => createHookItem())
+  const [showForm, setShowForm] = useState(false)
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState('')
 
@@ -2025,6 +2281,7 @@ function HooksSection({ hooks, onSave, refreshData }: { hooks: HookItem[]; onSav
     await refreshData()
     onSave('Hook saved')
     setEditing(createHookItem())
+    setShowForm(false)
   }
 
   const remove = async (id: string) => {
@@ -2042,10 +2299,9 @@ function HooksSection({ hooks, onSave, refreshData }: { hooks: HookItem[]; onSav
 
   return (
     <div className="stack">
-      <Card><HookForm hook={editing} setHook={setEditing} onSubmit={save} /></Card>
       <Card tone="blue">
         <div className="section-head">
-          <div><h2>Starter hooks</h2><p className="muted">Optional searchable hook bank seed.</p></div>
+          <div><h2>Hooks</h2></div>
           <button className="secondary-button" type="button" onClick={loadStarter}>Load Starter Hooks</button>
         </div>
       </Card>
@@ -2065,19 +2321,22 @@ function HooksSection({ hooks, onSave, refreshData }: { hooks: HookItem[]; onSav
                 {hook.notes && <p className="muted">{hook.notes}</p>}
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(hook)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(hook); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(hook.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createHookItem()); setShowForm(!showForm) }}>Add hook</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit hook</summary><HookForm hook={editing} setHook={setEditing} onSubmit={save} /></details>}
     </div>
   )
 }
 
 function CaptionsSection({ captions, onSave, refreshData }: { captions: CaptionTemplate[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<CaptionTemplate>(() => createCaptionTemplate())
+  const [showForm, setShowForm] = useState(false)
   const [search, setSearch] = useState('')
   const filtered = captions.filter((caption) => [caption.captionTitle, caption.captionText, caption.notes].some((field) => field.toLowerCase().includes(search.toLowerCase())))
 
@@ -2087,6 +2346,7 @@ function CaptionsSection({ captions, onSave, refreshData }: { captions: CaptionT
     await refreshData()
     onSave('Caption template saved')
     setEditing(createCaptionTemplate())
+    setShowForm(false)
   }
 
   const remove = async (id: string) => {
@@ -2104,10 +2364,9 @@ function CaptionsSection({ captions, onSave, refreshData }: { captions: CaptionT
 
   return (
     <div className="stack">
-      <Card><CaptionForm caption={editing} setCaption={setEditing} onSubmit={save} /></Card>
       <Card tone="blue">
         <div className="section-head">
-          <div><h2>Starter captions</h2><p className="muted">Optional reusable templates.</p></div>
+          <div><h2>Captions</h2></div>
           <button className="secondary-button" type="button" onClick={loadStarter}>Load Starter Captions</button>
         </div>
       </Card>
@@ -2122,19 +2381,22 @@ function CaptionsSection({ captions, onSave, refreshData }: { captions: CaptionT
                 <p className="muted preline">{caption.captionText || 'No caption text.'}</p>
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(caption)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(caption); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(caption.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createCaptionTemplate()); setShowForm(!showForm) }}>Add caption</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit caption</summary><CaptionForm caption={editing} setCaption={setEditing} onSubmit={save} /></details>}
     </div>
   )
 }
 
 function HashtagsSection({ hashtagRecords, onSave, refreshData }: { hashtagRecords: HashtagSetRecord[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<HashtagSetRecord>(() => createHashtagSetRecord())
+  const [showForm, setShowForm] = useState(false)
   const [search, setSearch] = useState('')
   const filtered = hashtagRecords.filter((set) => [set.setName, set.hashtags, set.notes].some((field) => field.toLowerCase().includes(search.toLowerCase())))
 
@@ -2144,6 +2406,7 @@ function HashtagsSection({ hashtagRecords, onSave, refreshData }: { hashtagRecor
     await refreshData()
     onSave('Hashtag set saved')
     setEditing(createHashtagSetRecord())
+    setShowForm(false)
   }
 
   const remove = async (id: string) => {
@@ -2161,10 +2424,9 @@ function HashtagsSection({ hashtagRecords, onSave, refreshData }: { hashtagRecor
 
   return (
     <div className="stack">
-      <Card><HashtagForm hashtagSet={editing} setHashtagSet={setEditing} onSubmit={save} /></Card>
       <Card tone="blue">
         <div className="section-head">
-          <div><h2>Starter hashtag sets</h2><p className="muted">Optional editable hashtag sets.</p></div>
+          <div><h2>Hashtags</h2></div>
           <button className="secondary-button" type="button" onClick={loadStarter}>Load Starter Hashtags</button>
         </div>
       </Card>
@@ -2179,19 +2441,22 @@ function HashtagsSection({ hashtagRecords, onSave, refreshData }: { hashtagRecor
                 <p className="muted">{set.hashtags}</p>
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(set)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(set); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(set.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createHashtagSetRecord()); setShowForm(!showForm) }}>Add hashtag set</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit hashtag set</summary><HashtagForm hashtagSet={editing} setHashtagSet={setEditing} onSubmit={save} /></details>}
     </div>
   )
 }
 
 function StoriesSection({ trackers, onSave, refreshData }: { trackers: StoryTracker[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<StoryTracker>(() => createStoryTracker())
+  const [showForm, setShowForm] = useState(false)
   const storyKeys: StoryBooleanKey[] = [
     'morningCheckInPosted',
     'pollPosted',
@@ -2215,6 +2480,7 @@ function StoriesSection({ trackers, onSave, refreshData }: { trackers: StoryTrac
     await refreshData()
     onSave('Story tracker saved')
     setEditing(createStoryTracker())
+    setShowForm(false)
   }
 
   const remove = async (id: string) => {
@@ -2226,9 +2492,6 @@ function StoriesSection({ trackers, onSave, refreshData }: { trackers: StoryTrac
 
   return (
     <div className="stack">
-      <Card>
-        <StoryForm tracker={editing} setTracker={setEditing} onSubmit={save} completed={completed} />
-      </Card>
       <DashboardGrid>
         <MetricCard label="Stories completed" value={`${completed}/${storyKeys.length}`} />
         <MetricCard label="Today consistency" value={formatPercent((completed / storyKeys.length) * 100)} />
@@ -2245,19 +2508,22 @@ function StoriesSection({ trackers, onSave, refreshData }: { trackers: StoryTrac
                 <p className="muted">Views: {formatNumber(tracker.storyViews)} · Replies: {formatNumber(tracker.replies)}</p>
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(tracker)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(tracker); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(tracker.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createStoryTracker()); setShowForm(!showForm) }}>Add story tracker</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit story tracker</summary><StoryForm tracker={editing} setTracker={setEditing} onSubmit={save} completed={completed} /></details>}
     </div>
   )
 }
 
 function CarouselsSection({ plans, onSave, refreshData }: { plans: CarouselPlan[]; onSave: (message?: string) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<CarouselPlan>(() => createCarouselPlan())
+  const [showForm, setShowForm] = useState(false)
 
   const save = async (event: FormEvent) => {
     event.preventDefault()
@@ -2265,6 +2531,7 @@ function CarouselsSection({ plans, onSave, refreshData }: { plans: CarouselPlan[
     await refreshData()
     onSave('Carousel plan saved')
     setEditing(createCarouselPlan())
+    setShowForm(false)
   }
 
   const remove = async (id: string) => {
@@ -2276,7 +2543,6 @@ function CarouselsSection({ plans, onSave, refreshData }: { plans: CarouselPlan[
 
   return (
     <div className="stack">
-      <Card><CarouselForm plan={editing} setPlan={setEditing} onSubmit={save} /></Card>
       <RecordList title="Carousel plans" emptyTitle="No carousel plans yet" emptyText="Plan useful saveable posts here.">
         {plans.map((plan) => (
           <Card key={plan.id}>
@@ -2287,13 +2553,15 @@ function CarouselsSection({ plans, onSave, refreshData }: { plans: CarouselPlan[
                 <p className="muted">{plan.slide1Hook || plan.topic || 'No hook yet.'}</p>
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(plan)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(plan); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(plan.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createCarouselPlan()); setShowForm(!showForm) }}>Add carousel</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit carousel</summary><CarouselForm plan={editing} setPlan={setEditing} onSubmit={save} /></details>}
     </div>
   )
 }
@@ -2353,9 +2621,7 @@ function MoreScreen({
   const [section, setSection] = useState<MoreSection>('backup')
   const sections: Array<{ key: MoreSection; label: string }> = [
     { key: 'backup', label: 'Backup' },
-    { key: 'goals', label: 'Goals' },
-    { key: 'collabs', label: 'Collabs' },
-    { key: 'inspiration', label: 'Inspiration' },
+    { key: 'settings', label: 'Settings' },
     { key: 'privacy', label: 'Privacy' },
   ]
 
@@ -2372,22 +2638,22 @@ function MoreScreen({
         <BackupTools
           backupMetadata={data.backupMetadata}
           backupReminder={backupReminder}
-          settings={settings}
-          onThemeChange={onThemeChange}
           onExport={onExport}
-          onCsvExport={onCsvExport}
           onImport={onImport}
           onImportText={onImportText}
-          onClear={onClear}
-          onDemo={onDemo}
           onBackupLater={onBackupLater}
           onBackupDone={onBackupDone}
         />
       )}
-      {section === 'goals' && <GoalTrackerSection goals={data.goalTrackers} reviews={data.weeklyReviews} onSave={onCsvExport} refreshData={refreshData} />}
-      {section === 'collabs' && <CollabTrackerSection collabs={data.collabTrackers} onSave={onCsvExport} refreshData={refreshData} />}
-      {section === 'inspiration' && <InspirationTrackerSection inspirations={data.inspirationTrackers} onSave={onCsvExport} refreshData={refreshData} />}
+      {section === 'settings' && <SettingsTools settings={settings} onThemeChange={onThemeChange} />}
       {section === 'privacy' && <PrivacyChecklistSection checklists={data.childPrivacyChecklists} plans={data.dailyPlans} ideas={data.contentIdeas} onSave={onCsvExport} refreshData={refreshData} />}
+      <AdvancedMoreTools
+        data={data}
+        onCsvExport={onCsvExport}
+        onClear={onClear}
+        onDemo={onDemo}
+        refreshData={refreshData}
+      />
     </Screen>
   )
 }
@@ -2395,33 +2661,21 @@ function MoreScreen({
 function BackupTools({
   backupMetadata,
   backupReminder,
-  settings,
-  onThemeChange,
   onExport,
-  onCsvExport,
   onImport,
   onImportText,
-  onClear,
-  onDemo,
   onBackupLater,
   onBackupDone,
 }: {
   backupMetadata?: BackupMetadata
   backupReminder: boolean
-  settings: AppSettings
-  onThemeChange: (theme: ThemeName) => Promise<void>
   onExport: () => Promise<void>
-  onCsvExport: (message?: string, countEntry?: boolean) => void
   onImport: (file: File, mode: 'replace' | 'merge') => Promise<void>
   onImportText: (text: string, mode: 'replace' | 'merge') => Promise<void>
-  onClear: () => Promise<void>
-  onDemo: () => Promise<void>
   onBackupLater: () => Promise<void>
   onBackupDone: () => Promise<void>
 }) {
-  const [clearStep, setClearStep] = useState(0)
   const [error, setError] = useState('')
-  const [backupPreview, setBackupPreview] = useState('')
   const [pastedBackup, setPastedBackup] = useState('')
   const [importMode, setImportMode] = useState<'replace' | 'merge'>('replace')
 
@@ -2449,20 +2703,9 @@ function BackupTools({
 
   return (
     <div className="stack">
-      <Card>
-        <h2>App info</h2>
-        <p className="muted">{settings.appName ?? appName} tracks creator growth for {settings.connectedHandle ?? connectedHandle}. Profile display: {settings.profileDisplayName ?? profileDisplayName}.</p>
-        <Select
-          label="Theme"
-          value={settings.theme}
-          onChange={(value) => onThemeChange(value as ThemeName)}
-          options={themeOptions.map((theme) => theme.value)}
-          getOptionLabel={(value) => themeOptions.find((theme) => theme.value === value)?.label ?? value}
-        />
-      </Card>
       {backupReminder && (
         <Card tone="blue">
-          <h2>Backup recommended. Export your data so your tracker stays safe.</h2>
+          <h2>Backup recommended</h2>
           <div className="button-cluster">
             <button className="primary-button" type="button" onClick={onExport}>Export Backup Now</button>
             <button className="secondary-button" type="button" onClick={onBackupLater}>Remind Me Later</button>
@@ -2472,8 +2715,9 @@ function BackupTools({
       )}
       <Card>
         <h2>Backup</h2>
-        <p className="muted">All data is stored locally in this browser using IndexedDB. Export a JSON backup regularly because browser data can be cleared.</p>
-        <p className="muted">Last backup: {backupMetadata?.lastBackupDate ? formatDate(backupMetadata.lastBackupDate) : 'No backup yet.'} Entries since backup: {backupMetadata?.entriesSinceLastBackup ?? 0}</p>
+        <p className="muted">Data is stored locally. Export backups regularly.</p>
+        <p className="muted">Last backup: {backupMetadata?.lastBackupDate ? formatDate(backupMetadata.lastBackupDate) : 'No backup yet.'}</p>
+        <p className="muted">Backup reminder: {backupReminder ? 'Due now' : 'Up to date'} · Entries since backup: {backupMetadata?.entriesSinceLastBackup ?? 0}</p>
         <div className="button-grid">
           <button className="primary-button" type="button" onClick={onExport}>Export JSON Backup</button>
           <Select label="Import mode" value={importMode} onChange={(value) => setImportMode(value as 'replace' | 'merge')} options={['replace', 'merge']} />
@@ -2481,25 +2725,69 @@ function BackupTools({
             Import JSON Backup
             <input type="file" accept="application/json" onChange={handleImport} />
           </label>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={async () => setBackupPreview(JSON.stringify(await createBackupPayload(), null, 2).slice(0, 800))}
-          >
-            Preview backup data
-          </button>
         </div>
-        <Textarea label="Paste JSON Backup" value={pastedBackup} onChange={setPastedBackup} />
-        <button className="secondary-button" type="button" disabled={!pastedBackup.trim()} onClick={handlePasteImport}>
-          Import pasted backup
-        </button>
+        <details>
+          <summary>Paste backup text</summary>
+          <Textarea label="Paste JSON Backup" value={pastedBackup} onChange={setPastedBackup} />
+          <button className="secondary-button" type="button" disabled={!pastedBackup.trim()} onClick={handlePasteImport}>
+            Import pasted backup
+          </button>
+        </details>
         {error && <p className="error-text">{error}</p>}
-        {backupPreview && <pre className="backup-preview">{backupPreview}</pre>}
       </Card>
+    </div>
+  )
+}
 
+function SettingsTools({ settings, onThemeChange }: { settings: AppSettings; onThemeChange: (theme: ThemeName) => Promise<void> }) {
+  return (
+    <div className="stack">
+      <Card>
+        <h2>Settings</h2>
+        <Select
+          label="Theme"
+          value={settings.theme}
+          onChange={(value) => onThemeChange(value as ThemeName)}
+          options={themeOptions.map((theme) => theme.value)}
+          getOptionLabel={(value) => themeOptions.find((theme) => theme.value === value)?.label ?? value}
+        />
+      </Card>
+      <Card>
+        <h2>App info</h2>
+        <p className="muted">{settings.appName ?? appName}</p>
+        <p className="muted">{settings.connectedHandle ?? connectedHandle} · {settings.profileDisplayName ?? profileDisplayName}</p>
+      </Card>
+      <Card>
+        <h2>iPhone install</h2>
+        <p className="muted">Open in Safari, tap Share, then Add to Home Screen.</p>
+        <p className="muted">Offline ready after first load.</p>
+      </Card>
+    </div>
+  )
+}
+
+function AdvancedMoreTools({ data, onCsvExport, onClear, onDemo, refreshData }: { data: AppData; onCsvExport: (message?: string, countEntry?: boolean) => void; onClear: () => Promise<void>; onDemo: () => Promise<void>; refreshData: () => Promise<void> }) {
+  const [clearStep, setClearStep] = useState(0)
+  const [backupPreview, setBackupPreview] = useState('')
+  return (
+    <details className="form-panel">
+      <summary>Advanced Tools</summary>
+      <div className="stack">
+        <details>
+          <summary>Goals</summary>
+          <GoalTrackerSection goals={data.goalTrackers} reviews={data.weeklyReviews} onSave={onCsvExport} refreshData={refreshData} />
+        </details>
+        <details>
+          <summary>Collabs</summary>
+          <CollabTrackerSection collabs={data.collabTrackers} onSave={onCsvExport} refreshData={refreshData} />
+        </details>
+        <details>
+          <summary>Inspiration</summary>
+          <InspirationTrackerSection inspirations={data.inspirationTrackers} onSave={onCsvExport} refreshData={refreshData} />
+        </details>
       <Card tone="blue">
         <h2>Future Option: Instagram API Integration</h2>
-        <p className="muted">Direct Instagram analytics import would require official Meta/Instagram API setup, login authorization, permissions, and token handling. For now, use screenshot import or manual entry.</p>
+        <p className="muted">Optional future feature. Official API setup requires Meta permissions and login flow. Screenshot import/manual entry is safer for now.</p>
       </Card>
 
       <Card>
@@ -2510,24 +2798,25 @@ function BackupTools({
           <button className="secondary-button" type="button" onClick={async () => { await exportDailyPlansCsv(); onCsvExport('Daily plans CSV exported', false) }}>Export daily plans</button>
           <button className="secondary-button" type="button" onClick={async () => { await exportStoryTrackersCsv(); onCsvExport('Story tracker CSV exported', false) }}>Export story tracker</button>
           <button className="secondary-button" type="button" onClick={async () => { await exportAudienceInsightsCsv(); onCsvExport('Audience insights CSV exported', false) }}>Export audience insights</button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={async () => setBackupPreview(JSON.stringify(await createBackupPayload(), null, 2).slice(0, 800))}
+          >
+            Preview backup data
+          </button>
         </div>
-      </Card>
-
-      <Card>
-        <h2>iPhone install</h2>
-        <p className="muted">On iPhone, open Insta Growth Tracker in Safari, tap Share, then tap Add to Home Screen. After that, open it like a normal app from your Home Screen.</p>
-        <p className="muted">Offline ready after first load. User data stays in IndexedDB on this device.</p>
+        {backupPreview && <pre className="backup-preview">{backupPreview}</pre>}
       </Card>
 
       <Card tone="blue">
         <h2>Load demo data</h2>
-        <p className="muted">The app starts empty. Demo records are added only if you click this button.</p>
         <button className="secondary-button" type="button" onClick={onDemo}>Load Demo Data</button>
       </Card>
 
       <Card tone="danger">
         <h2>Clear all data</h2>
-        <p className="muted">This removes plans, checklists, Reels, stage stats, and weekly reviews from this browser.</p>
+        <p className="muted">This removes local tracker data from this browser.</p>
         {clearStep === 0 && (
           <button className="danger-button" type="button" onClick={() => setClearStep(1)}>Clear data</button>
         )}
@@ -2553,7 +2842,8 @@ function BackupTools({
           </div>
         )}
       </Card>
-    </div>
+      </div>
+    </details>
   )
 }
 
@@ -2588,9 +2878,6 @@ function GoalTrackerSection({
 
   return (
     <div className="stack">
-      <Card>
-        <GoalForm goal={editing} setGoal={setEditing} onSubmit={save} />
-      </Card>
       <DashboardGrid>
         <MetricCard label="Followers remaining" value={formatNumber(goalMath.remaining)} />
         <MetricCard label="Days remaining" value={formatNumber(goalMath.daysRemaining)} />
@@ -2600,12 +2887,17 @@ function GoalTrackerSection({
         <MetricCard label="Status" value={String(goalMath.status)} />
       </DashboardGrid>
       <Card tone="blue"><h2>{guidance}</h2></Card>
+      <details className="form-panel">
+        <summary>Add or edit goal</summary>
+        <GoalForm goal={editing} setGoal={setEditing} onSubmit={save} />
+      </details>
     </div>
   )
 }
 
 function CollabTrackerSection({ collabs, onSave, refreshData }: { collabs: CollabTracker[]; onSave: (message?: string, countEntry?: boolean) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<CollabTracker>(() => createCollabTracker())
+  const [showForm, setShowForm] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
@@ -2623,6 +2915,7 @@ function CollabTrackerSection({ collabs, onSave, refreshData }: { collabs: Colla
     await refreshData()
     onSave('Collab saved')
     setEditing(createCollabTracker())
+    setShowForm(false)
   }
   const remove = async (id: string) => {
     if (!window.confirm('Delete this collab record?')) return
@@ -2633,8 +2926,7 @@ function CollabTrackerSection({ collabs, onSave, refreshData }: { collabs: Colla
 
   return (
     <div className="stack">
-      <Card><CollabForm collab={editing} setCollab={setEditing} onSubmit={save} /></Card>
-      <Card tone="blue"><p className="muted">If this is paid, gifted, sponsored, or promotional, use a clear disclosure such as Ad, Sponsored, Collaboration, Partnership, or Gifted.</p></Card>
+      <Card tone="blue"><p className="muted">Use clear disclosure for paid, gifted, sponsored, or promotional work.</p></Card>
       <Card>
         <div className="form-grid compact">
           <Select label="Filter status" value={statusFilter} onChange={setStatusFilter} options={['', ...collabStatuses]} />
@@ -2653,19 +2945,22 @@ function CollabTrackerSection({ collabs, onSave, refreshData }: { collabs: Colla
                 <p className="muted">{collab.collabIdea || collab.resultNotes || 'No notes yet.'}</p>
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(collab)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(collab); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(collab.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createCollabTracker()); setShowForm(!showForm) }}>Add collab</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit collab</summary><CollabForm collab={editing} setCollab={setEditing} onSubmit={save} /></details>}
     </div>
   )
 }
 
 function InspirationTrackerSection({ inspirations, onSave, refreshData }: { inspirations: InspirationTracker[]; onSave: (message?: string, countEntry?: boolean) => void; refreshData: () => Promise<void> }) {
   const [editing, setEditing] = useState<InspirationTracker>(() => createInspirationTracker())
+  const [showForm, setShowForm] = useState(false)
   const [statusFilter, setStatusFilter] = useState('')
   const filtered = inspirations.filter((item) => !statusFilter || item.status === statusFilter)
   const save = async (event: FormEvent) => {
@@ -2674,6 +2969,7 @@ function InspirationTrackerSection({ inspirations, onSave, refreshData }: { insp
     await refreshData()
     onSave('Inspiration saved')
     setEditing(createInspirationTracker())
+    setShowForm(false)
   }
   const remove = async (id: string) => {
     if (!window.confirm('Delete this inspiration record?')) return
@@ -2683,8 +2979,7 @@ function InspirationTrackerSection({ inspirations, onSave, refreshData }: { insp
   }
   return (
     <div className="stack">
-      <Card><InspirationForm inspiration={editing} setInspiration={setEditing} onSubmit={save} /></Card>
-      <Card tone="blue"><p className="muted">Use this to learn formats and hooks. Do not copy content directly. Adapt the idea to {profileDisplayName}'s voice.</p></Card>
+      <Card tone="blue"><p className="muted">Learn formats and hooks. Adapt ideas to {profileDisplayName}'s voice.</p></Card>
       <Card><Select label="Filter status" value={statusFilter} onChange={setStatusFilter} options={['', ...inspirationStatuses]} /></Card>
       <RecordList title="Manual Inspiration Tracker" emptyTitle="No inspiration saved yet" emptyText="Manually save ethical inspiration. No scraping or Instagram API is used.">
         {filtered.map((item) => (
@@ -2696,13 +2991,15 @@ function InspirationTrackerSection({ inspirations, onSave, refreshData }: { insp
                 <p className="muted">{item.hookUsed || item.topic || 'No hook saved.'}</p>
               </div>
               <div className="button-cluster">
-                <button className="secondary-button" type="button" onClick={() => setEditing(item)}>Edit</button>
+                <button className="secondary-button" type="button" onClick={() => { setEditing(item); setShowForm(true) }}>Edit</button>
                 <button className="danger-button" type="button" onClick={() => remove(item.id)}>Delete</button>
               </div>
             </div>
           </Card>
         ))}
       </RecordList>
+      <button className="secondary-button" type="button" onClick={() => { setEditing(createInspirationTracker()); setShowForm(!showForm) }}>Add inspiration</button>
+      {showForm && <details className="form-panel" open><summary>Add or edit inspiration</summary><InspirationForm inspiration={editing} setInspiration={setEditing} onSubmit={save} /></details>}
     </div>
   )
 }
@@ -2969,11 +3266,23 @@ function MonthlyReviewForm({ review, setReview, onSubmit }: { review: MonthlyRev
   const avgReach = review.totalReelsPosted > 0 ? review.totalReach / review.totalReelsPosted : 0
   return (
     <form className="stack" onSubmit={onSubmit}>
+      <h2>Growth</h2>
       <div className="form-grid">
         <Input label="Month" type="month" value={review.month} onChange={(value) => setField('month', value)} />
-        {(['startingFollowers', 'endingFollowers', 'totalReach', 'totalReelsPosted', 'totalStoriesPosted', 'totalCarouselsPosted'] as Array<keyof MonthlyReview>).map((key) => (
+        {(['startingFollowers', 'endingFollowers', 'totalReach'] as Array<keyof MonthlyReview>).map((key) => (
           <Input key={key} label={labelize(key)} type="number" value={String(review[key])} onChange={(value) => setField(key, numberOrZero(value) as MonthlyReview[typeof key])} />
         ))}
+      </div>
+      <h2>Posting</h2>
+      <div className="form-grid">
+        {(['totalReelsPosted', 'totalStoriesPosted', 'totalCarouselsPosted'] as Array<keyof MonthlyReview>).map((key) => (
+          <Input key={key} label={labelize(key)} type="number" value={String(review[key])} onChange={(value) => setField(key, numberOrZero(value) as MonthlyReview[typeof key])} />
+        ))}
+      </div>
+      <h2>Performance</h2>
+      <Textarea label="Top 5 Reels" value={review.top5Reels} onChange={(value) => setField('top5Reels', value)} />
+      <Textarea label="Worst 5 Reels" value={review.worst5Reels} onChange={(value) => setField('worst5Reels', value)} />
+      <div className="form-grid">
         <Select label="Best pillar" value={review.bestPillar} onChange={(value) => setField('bestPillar', value)} options={['', ...contentPillars]} />
         <Select label="Weakest pillar" value={review.weakestPillar} onChange={(value) => setField('weakestPillar', value)} options={['', ...contentPillars]} />
         <Select label="Best hook type" value={review.bestHookType} onChange={(value) => setField('bestHookType', value)} options={['', ...hookTypes]} />
@@ -2981,12 +3290,14 @@ function MonthlyReviewForm({ review, setReview, onSubmit }: { review: MonthlyRev
         <Input label="Best posting time" type="time" value={review.bestPostingTime} onChange={(value) => setField('bestPostingTime', value)} />
         <Select label="Top audience age group" value={review.topAudienceAgeGroup} onChange={(value) => setField('topAudienceAgeGroup', value)} options={['', ...ageGroups]} />
       </div>
-      <DashboardGrid><MetricCard label="Follower gain" value={formatNumber(followerGain)} /><MetricCard label="Avg reach / Reel" value={formatNumber(avgReach)} /></DashboardGrid>
-      <Textarea label="Top 5 Reels" value={review.top5Reels} onChange={(value) => setField('top5Reels', value)} />
-      <Textarea label="Worst 5 Reels" value={review.worst5Reels} onChange={(value) => setField('worst5Reels', value)} />
+      <h2>Learnings</h2>
       <Textarea label="Main lesson" value={review.mainLesson} onChange={(value) => setField('mainLesson', value)} />
       <Textarea label="Next month strategy" value={review.nextMonthStrategy} onChange={(value) => setField('nextMonthStrategy', value)} />
-      <Textarea label="Notes" value={review.notes} onChange={(value) => setField('notes', value)} />
+      <details>
+        <summary>Calculated monthly metrics</summary>
+        <DashboardGrid><MetricCard label="Follower gain" value={formatNumber(followerGain)} /><MetricCard label="Avg reach / Reel" value={formatNumber(avgReach)} /></DashboardGrid>
+        <Textarea label="Notes" value={review.notes} onChange={(value) => setField('notes', value)} />
+      </details>
       <button className="primary-button" type="submit">Save monthly review</button>
     </form>
   )
@@ -3105,50 +3416,6 @@ function PrivacyForm({ checklist, setChecklist, plans, ideas, onSubmit }: { chec
       <Textarea label="Safer alternative notes" value={checklist.saferAlternativeNotes} onChange={(value) => setField('saferAlternativeNotes', value)} />
       <button className="primary-button" type="submit">Save privacy checklist</button>
     </form>
-  )
-}
-
-function QuickCreatePlan({ hashtagOptions, suggestions, onCreate }: { hashtagOptions: string[]; suggestions: ReturnType<typeof getPlanSuggestions>; onCreate: (plan: DailyPlan) => void }) {
-  const [draft, setDraft] = useState<DailyPlan>(() => ({
-    ...createDailyPlan(),
-    hook: suggestions.hooks[0] ?? '',
-    videoBackground: suggestions.backgrounds[0] ?? videoBackgrounds[0],
-    captionCTA: suggestions.ctas[0] ?? captionCtas[0],
-    hashtagSet: hashtagOptions.includes(suggestions.hashtagSet) ? suggestions.hashtagSet : hashtagOptions[0],
-    searchKeywords: suggestions.keywords.join(', '),
-  }))
-  const setField = <K extends keyof DailyPlan>(key: K, value: DailyPlan[K]) => {
-    const next = { ...draft, [key]: value }
-    if (key === 'contentPillar') {
-      const nextSuggestions = getPlanSuggestions(String(value), [], [], [])
-      next.hook = next.hook || nextSuggestions.hooks[0] || ''
-      next.searchKeywords = nextSuggestions.keywords.join(', ')
-      next.videoBackground = nextSuggestions.backgrounds[0] ?? next.videoBackground
-      next.captionCTA = nextSuggestions.ctas[0] ?? next.captionCTA
-    }
-    setDraft(next)
-  }
-  return (
-    <div className="stack">
-      <h2>Quick Create Plan</h2>
-      <div className="form-grid">
-        <Select label="Step 1: Content pillar" value={draft.contentPillar} onChange={(value) => setField('contentPillar', value)} options={contentPillars} />
-        <Select label="Step 2: Goal" value={draft.reelGoal} onChange={(value) => setField('reelGoal', value)} options={reelGoals} />
-        <Select label="Step 3: Hook type" value={draft.hook} onChange={(value) => setField('hook', value)} options={hookTypes} />
-        <Select label="Step 4: Background" value={draft.videoBackground} onChange={(value) => setField('videoBackground', value)} options={videoBackgrounds} />
-        <Select label="Step 5: Duration" value={draft.videoLength} onChange={(value) => setField('videoLength', value)} options={videoLengths} />
-        <Select label="Step 6: Posting time" value={draft.plannedPostingTime} onChange={(value) => setField('plannedPostingTime', value)} options={postingTimeOptions} />
-        <Select label="Step 7: Caption CTA" value={draft.captionCTA} onChange={(value) => setField('captionCTA', value)} options={captionCtas} />
-        <Select label="Step 8: Hashtag set" value={draft.hashtagSet} onChange={(value) => setField('hashtagSet', value)} options={hashtagOptions} />
-      </div>
-      <Textarea label="Manual title or idea" value={draft.primaryReelTitle} onChange={(value) => setField('primaryReelTitle', value)} />
-      <Card>
-        <p className="eyebrow">Step 9: Review</p>
-        <h2>{draft.primaryReelTitle || `${draft.contentPillar} ${draft.reelGoal} Reel`}</h2>
-        <p className="muted">{draft.hook} · {draft.videoBackground} · {draft.videoLength} · {draft.plannedPostingTime}</p>
-      </Card>
-      <button className="primary-button" type="button" onClick={() => onCreate({ ...draft, primaryReelTitle: draft.primaryReelTitle || `${draft.contentPillar} ${draft.reelGoal} Reel`, fullIdea: draft.fullIdea || `Create a ${draft.reelGoal.toLowerCase()} focused Reel for ${draft.contentPillar}.` })}>Save to Daily Plan Form</button>
-    </div>
   )
 }
 
@@ -3331,7 +3598,6 @@ function PlanForm({
   suggestions: ReturnType<typeof getPlanSuggestions>
 }) {
   const setField = <K extends keyof DailyPlan>(key: K, value: DailyPlan[K]) => setPlan({ ...plan, [key]: value })
-  const [showMore, setShowMore] = useState(false)
   return (
     <form className="stack" onSubmit={onSubmit}>
       {(hooks.length > 0 || captions.length > 0) && (
@@ -3364,45 +3630,56 @@ function PlanForm({
           )}
         </div>
       )}
-      <Card tone="blue">
-        <h2>Suggested auto-fill</h2>
-        <div className="chip-row">
+      <details>
+        <summary>Suggestions from Library</summary>
+        <div className="chip-row suggestion-row">
           {suggestions.hooks.map((hook) => <button className="chip-button" type="button" key={hook} onClick={() => setField('hook', hook)}>{hook}</button>)}
           {suggestions.ctas.map((cta) => <button className="chip-button" type="button" key={cta} onClick={() => setField('captionCTA', cta)}>{cta}</button>)}
           {suggestions.backgrounds.map((background) => <button className="chip-button" type="button" key={background} onClick={() => setField('videoBackground', background)}>{background}</button>)}
           <button className="chip-button" type="button" onClick={() => setField('searchKeywords', suggestions.keywords.join(', '))}>Suggested keywords</button>
           <button className="chip-button" type="button" onClick={() => setField('hashtagSet', suggestions.hashtagSet)}>Suggested hashtag set</button>
         </div>
-      </Card>
+      </details>
+      <h2>Essentials</h2>
       <div className="form-grid">
         <Input label="Date" type="date" value={plan.date} onChange={(value) => setField('date', value)} />
         <Input label="Day number" type="number" value={plan.dayNumber ?? ''} onChange={(value) => setField('dayNumber', value ? numberOrZero(value) : undefined)} />
         <Input label="Primary Reel title" value={plan.primaryReelTitle} onChange={(value) => setField('primaryReelTitle', value)} />
+        <Textarea label="Hook" value={plan.hook} onChange={(value) => setField('hook', value)} />
+        <Select label="Status" value={plan.status} onChange={(value) => setField('status', value as DailyPlan['status'])} options={planStatuses} />
+      </div>
+      <details>
+        <summary>Content</summary>
+        <div className="form-grid details-grid">
         <Select label="Content pillar" value={plan.contentPillar} onChange={(value) => setField('contentPillar', value)} options={contentPillars} />
         <Select label="Series name" value={plan.seriesName} onChange={(value) => setField('seriesName', value)} options={seriesNames} />
         <Select label="Reel goal" value={plan.reelGoal} onChange={(value) => setField('reelGoal', value)} options={reelGoals} />
         <Select label="Video background" value={plan.videoBackground} onChange={(value) => setField('videoBackground', value)} options={videoBackgrounds} />
         <Select label="Video length" value={plan.videoLength} onChange={(value) => setField('videoLength', value)} options={videoLengths} />
+          <Select label="Suggested posting time" value={plan.plannedPostingTime} onChange={(value) => setField('plannedPostingTime', value)} options={postingTimeOptions} />
+        </div>
+        <Textarea label="Full idea" value={plan.fullIdea ?? ''} onChange={(value) => setField('fullIdea', value)} />
+        <Textarea label="Script outline" value={plan.scriptOutline} onChange={(value) => setField('scriptOutline', value)} />
+      </details>
+      <details>
+        <summary>Caption & Growth</summary>
+        <Textarea label="Caption" value={plan.captionDraft ?? ''} onChange={(value) => setField('captionDraft', value)} />
+        <div className="form-grid details-grid">
         <Select label="Caption CTA" value={plan.captionCTA} onChange={(value) => setField('captionCTA', value)} options={Array.from(new Set([...captionCtas, ...captionCategories, ...libraryGoals]))} />
         <Select label="Hashtag set" value={plan.hashtagSet} onChange={(value) => setField('hashtagSet', value)} options={hashtagOptions} />
-        <Select label="Status" value={plan.status} onChange={(value) => setField('status', value as DailyPlan['status'])} options={planStatuses} />
-        <Select label="Suggested posting time" value={plan.plannedPostingTime} onChange={(value) => setField('plannedPostingTime', value)} options={postingTimeOptions} />
-      </div>
-      <Textarea label="Hook" value={plan.hook} onChange={(value) => setField('hook', value)} />
-      <Textarea label="Full idea" value={plan.fullIdea ?? ''} onChange={(value) => setField('fullIdea', value)} />
-      <Textarea label="Script outline" value={plan.scriptOutline} onChange={(value) => setField('scriptOutline', value)} />
-      <Textarea label="Caption" value={plan.captionDraft ?? ''} onChange={(value) => setField('captionDraft', value)} />
-      <Textarea label="Search keywords" value={plan.searchKeywords ?? ''} onChange={(value) => setField('searchKeywords', value)} />
-      <Input label="Cover text" value={plan.coverText ?? ''} onChange={(value) => setField('coverText', value)} />
-      <Textarea label="Story follow-up" value={plan.storyFollowUp} onChange={(value) => setField('storyFollowUp', value)} />
-      <button className="secondary-button" type="button" onClick={() => setShowMore(!showMore)}>{showMore ? 'Hide More Details' : 'More Details'}</button>
-      {showMore && (
-        <div className="stack">
+        </div>
+        <Textarea label="Search keywords" value={plan.searchKeywords ?? ''} onChange={(value) => setField('searchKeywords', value)} />
+        <Input label="Cover text" value={plan.coverText ?? ''} onChange={(value) => setField('coverText', value)} />
+        <Textarea label="Story follow-up" value={plan.storyFollowUp} onChange={(value) => setField('storyFollowUp', value)} />
+      </details>
+      <details>
+        <summary>Advanced</summary>
+        <div className="form-grid details-grid">
           <Input label="Optional second Reel title" value={plan.secondReelTitle ?? ''} onChange={(value) => setField('secondReelTitle', value)} />
           <Input label="Actual posted time" type="time" value={plan.actualPostedTime ?? ''} onChange={(value) => setField('actualPostedTime', value)} />
-          <Textarea label="Notes" value={plan.notes} onChange={(value) => setField('notes', value)} />
         </div>
-      )}
+        <Textarea label="Notes" value={plan.notes} onChange={(value) => setField('notes', value)} />
+      </details>
       <button className="primary-button" type="submit">Save daily plan</button>
     </form>
   )
@@ -3436,53 +3713,66 @@ function ReelForm({
 
   return (
     <form className="stack" onSubmit={onSubmit}>
+      <h2>Essentials</h2>
       <div className="form-grid">
         <Input label="Reel title" value={reel.reelTitle} onChange={(value) => setField('reelTitle', value)} />
         <Input label="Date posted" type="date" value={reel.datePosted} onChange={(value) => setField('datePosted', value)} />
-        <Input label="Time posted" type="time" value={reel.timePosted} onChange={(value) => setField('timePosted', value)} />
-        <Select label="Content pillar" value={reel.contentPillar} onChange={(value) => setField('contentPillar', value)} options={contentPillars} />
-        <Select label="Series name" value={reel.seriesName} onChange={(value) => setField('seriesName', value)} options={seriesNames} />
-        <Select label="Reel goal" value={reel.reelGoal} onChange={(value) => setField('reelGoal', value)} options={reelGoals} />
-        <Select label="Hook type" value={reel.hookType} onChange={(value) => setField('hookType', value)} options={['', ...hookTypes]} />
-        <Select label="Video style" value={reel.videoStyle} onChange={(value) => setField('videoStyle', value)} options={videoBackgrounds} />
-        <Select label="Video length" value={reel.videoLength} onChange={(value) => setField('videoLength', value)} options={videoLengths} />
-        <Input label="Cover text" value={reel.coverText} onChange={(value) => setField('coverText', value)} />
-        <Select label="Caption CTA" value={reel.captionCTA} onChange={(value) => setField('captionCTA', value)} options={captionCtas} />
-        <Select label="Hashtag set" value={reel.hashtagSet} onChange={(value) => setField('hashtagSet', value)} options={hashtagOptions} />
       </div>
 
-      <h2>Lifetime stats</h2>
+      <h2>Core metrics</h2>
       <div className="form-grid compact">
-        {(['views', 'reach', 'likes', 'comments', 'saves', 'shares', 'profileVisits', 'followsGained', 'nonFollowerReach', 'averageWatchTime', 'retentionPercentage'] as Array<keyof ReelPerformance>).map((key) => (
+        {(['views', 'reach', 'likes', 'comments', 'saves', 'shares', 'profileVisits', 'followsGained', 'averageWatchTime'] as Array<keyof ReelPerformance>).map((key) => (
           <Input key={key} label={labelize(key)} type="number" value={String(reel[key] ?? 0)} onChange={(value) => setNumber(key, value)} />
         ))}
       </div>
 
-      <DashboardGrid>
-        <MetricCard label="Engagement" value={formatPercent(metrics.engagementRate)} />
-        <MetricCard label="Share rate" value={formatPercent(metrics.shareRate)} />
-        <MetricCard label="Save rate" value={formatPercent(metrics.saveRate)} />
-        <MetricCard label="Comment rate" value={formatPercent(metrics.commentRate)} />
-        <MetricCard label="Profile visit rate" value={formatPercent(metrics.profileVisitRate)} />
-        <MetricCard label="Follow conversion" value={formatPercent(metrics.followConversionRate)} />
-        <MetricCard label="Profile visit conversion" value={formatPercent(metrics.profileVisitConversion)} />
-        <MetricCard label="Follows / 1,000 reach" value={formatNumber(metrics.followsPerThousandReach)} />
-      </DashboardGrid>
+      <Select label="Decision / next action" value={reel.decision} onChange={(value) => setField('decision', value as ReelPerformance['decision'])} options={['', ...reelDecisions]} />
 
-      <h2>24h / 72h / 7-day tracking</h2>
-      <div className="stage-grid">
-        {stages.map((stage) => (
-          <div className="stage-card" key={stage.id}>
-            <h3>{stage.stage}</h3>
-            {(['reach', 'views', 'likes', 'comments', 'saves', 'shares', 'profileVisits', 'follows'] as Array<keyof ReelStageStats>).map((key) => (
-              <Input key={key} label={labelize(key)} type="number" value={String(stage[key] ?? 0)} onChange={(value) => updateStage(stage.id, key, value)} />
-            ))}
-          </div>
-        ))}
-      </div>
+      <details>
+        <summary>Advanced Reel Details</summary>
+        <div className="form-grid details-grid">
+          <Input label="Time posted" type="time" value={reel.timePosted} onChange={(value) => setField('timePosted', value)} />
+          <Select label="Content pillar" value={reel.contentPillar} onChange={(value) => setField('contentPillar', value)} options={contentPillars} />
+          <Select label="Series name" value={reel.seriesName} onChange={(value) => setField('seriesName', value)} options={seriesNames} />
+          <Select label="Reel goal" value={reel.reelGoal} onChange={(value) => setField('reelGoal', value)} options={reelGoals} />
+          <Select label="Hook type" value={reel.hookType} onChange={(value) => setField('hookType', value)} options={['', ...hookTypes]} />
+          <Select label="Video style" value={reel.videoStyle} onChange={(value) => setField('videoStyle', value)} options={videoBackgrounds} />
+          <Select label="Video length" value={reel.videoLength} onChange={(value) => setField('videoLength', value)} options={videoLengths} />
+          <Input label="Cover text" value={reel.coverText} onChange={(value) => setField('coverText', value)} />
+          <Select label="Caption CTA" value={reel.captionCTA} onChange={(value) => setField('captionCTA', value)} options={captionCtas} />
+          <Select label="Hashtag set" value={reel.hashtagSet} onChange={(value) => setField('hashtagSet', value)} options={hashtagOptions} />
+          <Input label="Non-follower reach" type="number" value={String(reel.nonFollowerReach ?? 0)} onChange={(value) => setNumber('nonFollowerReach', value)} />
+          <Input label="Retention percentage" type="number" value={String(reel.retentionPercentage ?? 0)} onChange={(value) => setNumber('retentionPercentage', value)} />
+        </div>
+        <Textarea label="Notes" value={reel.notes} onChange={(value) => setField('notes', value)} />
+      </details>
 
-      <Select label="Decision" value={reel.decision} onChange={(value) => setField('decision', value as ReelPerformance['decision'])} options={['', ...reelDecisions]} />
-      <Textarea label="Notes" value={reel.notes} onChange={(value) => setField('notes', value)} />
+      <details>
+        <summary>24h / 72h / 7d Tracking</summary>
+        <div className="stage-grid details-grid">
+          {stages.map((stage) => (
+            <div className="stage-card" key={stage.id}>
+              <h3>{stage.stage}</h3>
+              {(['reach', 'views', 'likes', 'comments', 'saves', 'shares', 'profileVisits', 'follows'] as Array<keyof ReelStageStats>).map((key) => (
+                <Input key={key} label={labelize(key)} type="number" value={String(stage[key] ?? 0)} onChange={(value) => updateStage(stage.id, key, value)} />
+              ))}
+            </div>
+          ))}
+        </div>
+      </details>
+
+      <details>
+        <summary>Performance Metrics</summary>
+        <DashboardGrid>
+          <MetricCard label="Engagement" value={formatPercent(metrics.engagementRate)} />
+          <MetricCard label="Share rate" value={formatPercent(metrics.shareRate)} />
+          <MetricCard label="Save rate" value={formatPercent(metrics.saveRate)} />
+          <MetricCard label="Comment rate" value={formatPercent(metrics.commentRate)} />
+          <MetricCard label="Profile visit rate" value={formatPercent(metrics.profileVisitRate)} />
+          <MetricCard label="Follow conversion" value={formatPercent(metrics.followConversionRate)} />
+          <MetricCard label="Follows / 1,000 reach" value={formatNumber(metrics.followsPerThousandReach)} />
+        </DashboardGrid>
+      </details>
       <div className="button-cluster">
         <button className="primary-button" type="submit">Save Reel</button>
         <button className="secondary-button" type="button" onClick={onReset}>New blank Reel</button>
@@ -3506,13 +3796,15 @@ function ReviewForm({
 }) {
   const setField = <K extends keyof WeeklyReview>(key: K, value: WeeklyReview[K]) => setReview({ ...review, [key]: value })
   const setNumber = (key: keyof WeeklyReview, value: string) => setReview({ ...review, [key]: numberOrZero(value) })
-  const numberKeys: Array<keyof WeeklyReview> = [
+  const growthKeys: Array<keyof WeeklyReview> = [
     'startingFollowers',
     'endingFollowers',
     'totalReach',
     'totalViews',
     'profileVisits',
     'accountsEngaged',
+  ]
+  const postingKeys: Array<keyof WeeklyReview> = [
     'reelsPosted',
     'storiesPosted',
     'carouselsPosted',
@@ -3522,37 +3814,52 @@ function ReviewForm({
 
   return (
     <form className="stack" onSubmit={onSubmit}>
+      <h2>Growth</h2>
       <div className="form-grid">
         <Input label="Week number" value={review.weekNumber} onChange={(value) => setField('weekNumber', value)} />
         <Input label="Start date" type="date" value={review.startDate} onChange={(value) => setField('startDate', value)} />
         <Input label="End date" type="date" value={review.endDate} onChange={(value) => setField('endDate', value)} />
-        {numberKeys.map((key) => (
+        {growthKeys.map((key) => (
           <Input key={key} label={labelize(key)} type="number" value={String(review[key] ?? 0)} onChange={(value) => setNumber(key, value)} />
         ))}
+      </div>
+      <h2>Posting</h2>
+      <div className="form-grid">
+        {postingKeys.map((key) => (
+          <Input key={key} label={labelize(key)} type="number" value={String(review[key] ?? 0)} onChange={(value) => setNumber(key, value)} />
+        ))}
+      </div>
+      <h2>Learnings</h2>
+      <div className="form-grid">
         <Input label="Best Reel" value={review.bestReel} onChange={(value) => setField('bestReel', value)} />
         <Input label="Worst Reel" value={review.worstReel} onChange={(value) => setField('worstReel', value)} />
         <Input label="Best content pillar" value={review.bestContentPillar} onChange={(value) => setField('bestContentPillar', value)} />
         <Input label="Worst content pillar" value={review.worstContentPillar} onChange={(value) => setField('worstContentPillar', value)} />
         <Input label="Best hook" value={review.bestHook} onChange={(value) => setField('bestHook', value)} />
         <Input label="Best posting time" value={review.bestPostingTime} onChange={(value) => setField('bestPostingTime', value)} />
-        <Input label="Top audience age group" value={review.topAudienceAgeGroup} onChange={(value) => setField('topAudienceAgeGroup', value)} />
-        <Input label="Top gender" value={review.topGender} onChange={(value) => setField('topGender', value)} />
-        <Input label="Top city" value={review.topCity} onChange={(value) => setField('topCity', value)} />
-        <Input label="Top country" value={review.topCountry} onChange={(value) => setField('topCountry', value)} />
       </div>
       <Textarea label="Main lesson" value={review.mainLesson} onChange={(value) => setField('mainLesson', value)} />
       <Textarea label="Next week focus" value={review.nextWeekFocus} onChange={(value) => setField('nextWeekFocus', value)} />
-      <DashboardGrid>
-        <MetricCard label="Followers gained" value={formatNumber(metrics.followersGained)} />
-        <MetricCard label="Follow conversion" value={formatPercent(metrics.followConversionRate)} />
-        <MetricCard label="Profile visit conversion" value={formatPercent(metrics.profileVisitConversion)} />
-        <MetricCard label="Average reach / Reel" value={formatNumber(metrics.averageReachPerReel)} />
-        <MetricCard label="Posting consistency" value={`${metrics.postingConsistencyScore}/100`} />
-      </DashboardGrid>
-      <Card tone="blue">
-        <p className="eyebrow">Weekly diagnosis</p>
-        <h2>{diagnosis}</h2>
-      </Card>
+      <details>
+        <summary>Audience notes</summary>
+        <div className="form-grid details-grid">
+          <Input label="Top audience age group" value={review.topAudienceAgeGroup} onChange={(value) => setField('topAudienceAgeGroup', value)} />
+          <Input label="Top gender" value={review.topGender} onChange={(value) => setField('topGender', value)} />
+          <Input label="Top city" value={review.topCity} onChange={(value) => setField('topCity', value)} />
+          <Input label="Top country" value={review.topCountry} onChange={(value) => setField('topCountry', value)} />
+        </div>
+      </details>
+      <details>
+        <summary>Calculated weekly metrics</summary>
+        <DashboardGrid>
+          <MetricCard label="Followers gained" value={formatNumber(metrics.followersGained)} />
+          <MetricCard label="Follow conversion" value={formatPercent(metrics.followConversionRate)} />
+          <MetricCard label="Profile visit conversion" value={formatPercent(metrics.profileVisitConversion)} />
+          <MetricCard label="Average reach / Reel" value={formatNumber(metrics.averageReachPerReel)} />
+          <MetricCard label="Posting consistency" value={`${metrics.postingConsistencyScore}/100`} />
+        </DashboardGrid>
+        <div className="inline-insight"><p className="eyebrow">Weekly diagnosis</p><h2>{diagnosis}</h2></div>
+      </details>
       <button className="primary-button" type="submit">Save weekly review</button>
     </form>
   )
