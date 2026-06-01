@@ -50,6 +50,8 @@ export interface AppSettings {
 export interface DailyPlan extends BaseRecord {
   date: string
   dayNumber?: number
+  week?: number
+  phase?: string
   primaryReelTitle: string
   secondReelTitle?: string
   contentPillar: string
@@ -64,10 +66,12 @@ export interface DailyPlan extends BaseRecord {
   captionCTA: string
   hashtagSet: string
   searchKeywords: string
+  onScreenText?: string
   coverText: string
   storyFollowUp: string
   plannedPostingTime: string
   actualPostedTime?: string
+  actualReelLink?: string
   status: DailyPlanStatus
   notes: string
 }
@@ -459,6 +463,8 @@ export interface RewardProgress extends BaseRecord {
 export interface IdeaMap extends BaseRecord {
   dayNumber: number
   date: string
+  week?: number
+  phase?: string
   reelTitle: string
   contentPillar: string
   seriesName: string
@@ -473,9 +479,11 @@ export interface IdeaMap extends BaseRecord {
   captionCTA: string
   hashtagSet: string
   searchKeywords: string
+  onScreenText?: string
   coverText: string
   storyFollowUp: string
   secondReelIdea: string
+  actualReelLink?: string
   status: DailyPlanStatus
   notes: string
 }

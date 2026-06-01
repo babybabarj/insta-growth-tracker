@@ -231,6 +231,8 @@ const generateIdeaMapItems = () =>
     return {
       ...createIdeaMap(day),
       date: '',
+      week: Math.ceil(day / 7),
+      phase,
       reelTitle: `Day ${day}: ${topic}`,
       contentPillar: pillar,
       seriesName: series,
@@ -252,8 +254,10 @@ const generateIdeaMapItems = () =>
       captionCTA: captionCtas[index % captionCtas.length],
       hashtagSet: hashtagSets[index % hashtagSets.length],
       searchKeywords: searchKeywordOptions.slice(index % 5, (index % 5) + 4).join(', '),
+      onScreenText: topic.slice(0, 32).toUpperCase(),
       coverText: topic.slice(0, 32).toUpperCase(),
       storyFollowUp: 'Ask followers if they have lived this today.',
+      actualReelLink: '',
       secondReelIdea: day % 5 === 0 ? `Hinglish version of Day ${day}` : '',
       notes: phase,
     }
@@ -358,6 +362,8 @@ const getPlanSuggestions = (pillar: string, hooks: HookItem[], captions: Caption
 const planFromIdea = (idea: IdeaMap, hashtagOptions: string[], date = todayISO()): DailyPlan => ({
   ...createDailyPlan(date),
   dayNumber: idea.dayNumber,
+  week: idea.week,
+  phase: idea.phase || idea.notes,
   primaryReelTitle: idea.reelTitle,
   secondReelTitle: idea.secondReelIdea,
   contentPillar: idea.contentPillar,
@@ -372,9 +378,11 @@ const planFromIdea = (idea: IdeaMap, hashtagOptions: string[], date = todayISO()
   captionCTA: idea.captionCTA,
   hashtagSet: hashtagOptions.includes(idea.hashtagSet) ? idea.hashtagSet : (hashtagOptions[0] ?? hashtagSets[0]),
   searchKeywords: idea.searchKeywords || '',
+  onScreenText: idea.onScreenText || idea.coverText || '',
   coverText: idea.coverText || '',
   storyFollowUp: idea.storyFollowUp,
   plannedPostingTime: idea.suggestedPostingTime || postingTimeOptions[0],
+  actualReelLink: idea.actualReelLink || '',
   status: 'Planned',
   notes: idea.notes,
 })
@@ -1280,18 +1288,30 @@ function PlannerScreen({
             </div>
           </div>
           <div className="idea-preview">
-            <p><strong>Pillar:</strong> {selectedIdea.contentPillar}</p>
-            <p><strong>Series:</strong> {selectedIdea.seriesName}</p>
-            <p><strong>Hook:</strong> {selectedIdea.hook || 'No hook yet.'}</p>
-            <p><strong>Idea:</strong> {selectedIdea.fullIdea || selectedIdea.scriptOutline || 'No idea summary yet.'}</p>
-            <p><strong>Duration:</strong> {selectedIdea.reelLength}</p>
-            <p><strong>Posting:</strong> {selectedIdea.suggestedPostingTime}</p>
-            <p><strong>CTA:</strong> {selectedIdea.captionCTA}</p>
-            <p><strong>Hashtags:</strong> {selectedIdea.hashtagSet}</p>
-            <p><strong>Keywords:</strong> {selectedIdea.searchKeywords || 'Not set'}</p>
-            <p><strong>Cover:</strong> {selectedIdea.coverText || 'Not set'}</p>
-            <p><strong>Story:</strong> {selectedIdea.storyFollowUp || 'Not set'}</p>
-            {selectedIdea.secondReelIdea && <p><strong>Optional second Reel:</strong> {selectedIdea.secondReelIdea}</p>}
+            <PreviewField label="Day" value={String(selectedIdea.dayNumber)} />
+            <PreviewField label="Planned date" value={selectedIdea.date || 'Not set'} />
+            <PreviewField label="Week" value={String(selectedIdea.week ?? Math.ceil(selectedIdea.dayNumber / 7))} />
+            <PreviewField label="Phase" value={selectedIdea.phase || selectedIdea.notes || 'Not set'} />
+            <PreviewField label="Pillar" value={selectedIdea.contentPillar} />
+            <PreviewField label="Series" value={selectedIdea.seriesName} />
+            <PreviewField label="Reel goal" value={selectedIdea.reelGoal} />
+            <PreviewField label="Reel title" value={selectedIdea.reelTitle || 'Untitled idea'} />
+            <PreviewField label="Viral hook" value={selectedIdea.hook || 'No hook yet.'} />
+            <PreviewField label="Script / content outline" value={selectedIdea.scriptOutline || selectedIdea.fullIdea || 'No script yet.'} />
+            <PreviewField label="Full idea" value={selectedIdea.fullIdea || 'Not set'} />
+            <PreviewField label="Recommended length" value={selectedIdea.reelLength} />
+            <PreviewField label="Visual / background" value={selectedIdea.videoBackground} />
+            <PreviewField label="On-screen text" value={selectedIdea.onScreenText || selectedIdea.coverText || 'Not set'} />
+            <PreviewField label="Cover text" value={selectedIdea.coverText || 'Not set'} />
+            <PreviewField label="Caption" value={selectedIdea.caption || 'Not set'} />
+            <PreviewField label="Caption CTA" value={selectedIdea.captionCTA} />
+            <PreviewField label="Hashtag set" value={selectedIdea.hashtagSet} />
+            <PreviewField label="Search keywords" value={selectedIdea.searchKeywords || 'Not set'} />
+            <PreviewField label="Story follow-up" value={selectedIdea.storyFollowUp || 'Not set'} />
+            <PreviewField label="Status" value={selectedIdea.status} />
+            <PreviewField label="Actual Reel link" value={selectedIdea.actualReelLink || 'Not set'} />
+            <PreviewField label="Notes" value={selectedIdea.notes || 'Not set'} />
+            <PreviewField label="Optional 2nd Reel idea" value={selectedIdea.secondReelIdea || 'Not set'} />
           </div>
           <div className="button-cluster">
             <button className="secondary-button" type="button" onClick={() => updateIdeaStatus(selectedIdea, 'Completed')}>Mark completed</button>
@@ -3124,6 +3144,8 @@ function IdeaMapForm({ idea, setIdea, hashtagOptions, onSubmit }: { idea: IdeaMa
       <div className="form-grid">
         <Input label="Day number" type="number" value={idea.dayNumber} onChange={(value) => setField('dayNumber', Math.max(1, numberOrZero(value)))} />
         <Input label="Date" type="date" value={idea.date} onChange={(value) => setField('date', value)} />
+        <Input label="Week" type="number" value={idea.week ?? Math.ceil(idea.dayNumber / 7)} onChange={(value) => setField('week', numberOrZero(value))} />
+        <Input label="Phase" value={idea.phase ?? ''} onChange={(value) => setField('phase', value)} />
         <Input label="Reel title" value={idea.reelTitle} onChange={(value) => setField('reelTitle', value)} />
         <Select label="Content pillar" value={idea.contentPillar} onChange={(value) => setField('contentPillar', value)} options={contentPillars} />
         <Select label="Series name" value={idea.seriesName} onChange={(value) => setField('seriesName', value)} options={seriesNames} />
@@ -3140,8 +3162,10 @@ function IdeaMapForm({ idea, setIdea, hashtagOptions, onSubmit }: { idea: IdeaMa
       <Textarea label="Script outline" value={idea.scriptOutline} onChange={(value) => setField('scriptOutline', value)} />
       <Textarea label="Caption" value={idea.caption ?? ''} onChange={(value) => setField('caption', value)} />
       <Textarea label="Search keywords" value={idea.searchKeywords ?? ''} onChange={(value) => setField('searchKeywords', value)} />
+      <Input label="On-screen text" value={idea.onScreenText ?? ''} onChange={(value) => setField('onScreenText', value)} />
       <Input label="Cover text" value={idea.coverText ?? ''} onChange={(value) => setField('coverText', value)} />
       <Textarea label="Story follow-up" value={idea.storyFollowUp} onChange={(value) => setField('storyFollowUp', value)} />
+      <Input label="Actual Reel link" value={idea.actualReelLink ?? ''} onChange={(value) => setField('actualReelLink', value)} />
       <Textarea label="Second Reel idea" value={idea.secondReelIdea} onChange={(value) => setField('secondReelIdea', value)} />
       <Textarea label="Notes" value={idea.notes} onChange={(value) => setField('notes', value)} />
       <button className="primary-button" type="submit">Save 90-day idea</button>
@@ -3661,6 +3685,8 @@ function PlanForm({
       <div className="form-grid">
         <Input label="Date" type="date" value={plan.date} onChange={(value) => setField('date', value)} />
         <Input label="Day number" type="number" value={plan.dayNumber ?? ''} onChange={(value) => setField('dayNumber', value ? numberOrZero(value) : undefined)} />
+        <Input label="Week" type="number" value={plan.week ?? ''} onChange={(value) => setField('week', value ? numberOrZero(value) : undefined)} />
+        <Input label="Phase" value={plan.phase ?? ''} onChange={(value) => setField('phase', value)} />
         <Input label="Primary Reel title" value={plan.primaryReelTitle} onChange={(value) => setField('primaryReelTitle', value)} />
         <Textarea label="Hook" value={plan.hook} onChange={(value) => setField('hook', value)} />
         <Select label="Status" value={plan.status} onChange={(value) => setField('status', value as DailyPlan['status'])} options={planStatuses} />
@@ -3686,6 +3712,7 @@ function PlanForm({
         <Select label="Hashtag set" value={plan.hashtagSet} onChange={(value) => setField('hashtagSet', value)} options={hashtagOptions} />
         </div>
         <Textarea label="Search keywords" value={plan.searchKeywords ?? ''} onChange={(value) => setField('searchKeywords', value)} />
+        <Input label="On-screen text" value={plan.onScreenText ?? ''} onChange={(value) => setField('onScreenText', value)} />
         <Input label="Cover text" value={plan.coverText ?? ''} onChange={(value) => setField('coverText', value)} />
         <Textarea label="Story follow-up" value={plan.storyFollowUp} onChange={(value) => setField('storyFollowUp', value)} />
       </details>
@@ -3694,6 +3721,7 @@ function PlanForm({
         <div className="form-grid details-grid">
           <Input label="Optional second Reel title" value={plan.secondReelTitle ?? ''} onChange={(value) => setField('secondReelTitle', value)} />
           <Input label="Actual posted time" type="time" value={plan.actualPostedTime ?? ''} onChange={(value) => setField('actualPostedTime', value)} />
+          <Input label="Actual Reel link" value={plan.actualReelLink ?? ''} onChange={(value) => setField('actualReelLink', value)} />
         </div>
         <Textarea label="Notes" value={plan.notes} onChange={(value) => setField('notes', value)} />
       </details>
@@ -3896,6 +3924,15 @@ function Screen({ title, eyebrow, children }: { title: string; eyebrow: string; 
 
 function Card({ children, tone }: { children: ReactNode; tone?: 'blue' | 'danger' }) {
   return <section className={`card ${tone ? `card-${tone}` : ''}`}>{children}</section>
+}
+
+function PreviewField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="preview-field">
+      <span>{label}</span>
+      <p>{value}</p>
+    </div>
+  )
 }
 
 function DashboardGrid({ children }: { children: ReactNode }) {
