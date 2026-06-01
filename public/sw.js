@@ -1,4 +1,4 @@
-const CACHE_NAME = 'insta-growth-tracker-v1'
+const CACHE_NAME = 'insta-growth-tracker-v2'
 const BASE_PATH = '/insta-growth-tracker/'
 const APP_SHELL = [`${BASE_PATH}`, `${BASE_PATH}index.html`, `${BASE_PATH}manifest.json`, `${BASE_PATH}pwa-icon.svg`]
 
@@ -19,15 +19,12 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached
-      return fetch(event.request)
-        .then((response) => {
-          const copy = response.clone()
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy))
-          return response
-        })
-        .catch(() => caches.match(`${BASE_PATH}index.html`))
-    }),
+    fetch(event.request)
+      .then((response) => {
+        const copy = response.clone()
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy))
+        return response
+      })
+      .catch(() => caches.match(event.request).then((cached) => cached || caches.match(`${BASE_PATH}index.html`))),
   )
 })
