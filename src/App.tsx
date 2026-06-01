@@ -652,6 +652,24 @@ function App() {
     [data.hashtagSetRecords],
   )
 
+  const saveHandle = async () => {
+    const current = appSettings.connectedHandle ?? connectedHandle
+    const raw = window.prompt('Instagram handle', current.replace(/^@/, ''))?.trim()
+    if (!raw) return
+    const nextHandle = `@${raw.replace(/^@+/, '')}`
+    const nextSettings = { ...appSettings, connectedHandle: nextHandle, updatedAt: nowISO() }
+    setData((currentData) => ({ ...currentData, settings: nextSettings }))
+    await db.settings.put(nextSettings)
+    markSaved('Instagram handle updated', false)
+  }
+
+  const setTodayChecklist = (next: DailyChecklist) => {
+    setData((currentData) => ({
+      ...currentData,
+      dailyChecklists: [next, ...currentData.dailyChecklists.filter((item) => item.id !== next.id && item.date !== next.date)],
+    }))
+  }
+
   const markBackupDone = async () => {
     const current = data.backupMetadata ?? createBackupMetadata()
     await db.backupMetadata.put({
@@ -680,6 +698,7 @@ function App() {
           onToggleChecklist={async (key) => {
             const base = todaysChecklist ?? createDailyChecklist(today)
             const next = { ...base, [key]: !base[key], updatedAt: nowISO() }
+            setTodayChecklist(next)
             await db.dailyChecklists.put(next)
             await saveTodayStreakHistory(next)
             await refreshData()
@@ -697,6 +716,7 @@ function App() {
               story5Posted: storyCount >= 3 ? false : base.story5Posted,
               updatedAt: nowISO(),
             }
+            setTodayChecklist(next)
             await db.dailyChecklists.put(next)
             await saveTodayStreakHistory(next)
             await refreshData()
@@ -853,13 +873,10 @@ function App() {
   return (
     <div className={`app-shell theme-${appSettings.theme}`}>
       <header className="app-header">
-        <div className="brand-block">
+        <button className="brand-block handle-button" type="button" onClick={saveHandle}>
           <span className="brand-accent" aria-hidden="true" />
-          <div>
-            <p className="eyebrow">{appSettings.connectedHandle ?? connectedHandle} · {appSettings.profileDisplayName ?? profileDisplayName}</p>
-            <h1>{appSettings.appName ?? appName}</h1>
-          </div>
-        </div>
+          <h1>{appSettings.connectedHandle ?? connectedHandle}</h1>
+        </button>
         <div className="save-status" aria-live="polite">
           {offlineReady ? `Offline ready${lastSaved ? ` · ${lastSaved}` : ''}` : lastSaved ? `Last saved ${lastSaved}` : 'Local only'}
         </div>
